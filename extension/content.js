@@ -264,8 +264,34 @@
             await delay(500);
           }
 
+          // Si la red no capturó la ubicación, intentar extraerla del DOM del panel de detalles
           if (!locationCaptured) {
-            log('⚠ Ubicación no capturada en 5s para:', device.name);
+            log('⚠ Ubicación no capturada por red en 5s, intentando desde DOM...');
+            const detailPanel = document.querySelector(
+              '[role="complementary"], [role="region"], aside, .detail-panel, #device-details, .device-details'
+            );
+            const domLocation = extractLocationFromPanel(detailPanel || document);
+            if (domLocation && (domLocation.lat || domLocation.address)) {
+              log('✓ Ubicación extraída del DOM para:', device.name, domLocation);
+              // Guardar en networkData para que notifyDashboard la encuentre
+              const existing = networkData.find(d =>
+                d.name?.toLowerCase() === deviceName ||
+                d.name?.toLowerCase().includes(deviceName.split(' ')[0])
+              );
+              if (existing) {
+                existing.location = domLocation;
+              } else {
+                networkData.push({ name: device.name, location: domLocation, source: 'dom-panel' });
+              }
+              locationCaptured = true;
+            } else {
+              log('⚠ Ubicación no disponible en DOM para:', device.name);
+            }
+          }
+
+          // Notificar al dashboard si capturamos ubicación
+          if (locationCaptured) {
+            notifyDashboard();
           }
 
           // PASO E: Volver a la lista haciendo clic en Back
@@ -486,6 +512,35 @@
     return null;
   }
 
+  // Limpiar el texto de un elemento eliminando los nombres de iconos Material Icon que se
+  // filtran como texto (p.ej. "sound_sensing", "location_on") y etiquetas de botones de acción.
+  // Devuelve el texto limpio o null si el resultado no sirve como nombre de dispositivo.
+  // Selector para eliminar nodos de iconos dentro de un elemento clonado.
+  const ICON_CHILD_SELECTOR =
+    'i, .material-icons, .google-material-icons, [class*="material-icon"], ' +
+    '[class*="googleMaterial"], .notranslate, [aria-hidden="true"]';
+
+  function cleanElementText(el) {
+    // Clonar el elemento para no modificar el DOM
+    const clone = el.cloneNode(true);
+    // Eliminar hijos que sean iconos (material-icons, google-material-icons, etc.)
+    clone.querySelectorAll(ICON_CHILD_SELECTOR).forEach(n => n.remove());
+
+    let text = (clone.textContent || '').trim();
+
+    // Eliminar tokens sueltos de nombres de iconos Material (snake_case todo en minúsculas):
+    // p.ej. "sound_sensing", "location_on", "battery_charging_full"
+    // Estos son siempre snake_case minúsculas — los nombres reales de dispositivos no usan guiones bajos.
+    text = text.replace(/\b[a-z]+(?:_[a-z0-9]+)+\b/g, ' ').replace(/\s+/g, ' ').trim();
+
+    return text || null;
+  }
+
+  // Regex combinada de etiquetas de botones de acción de Google Find My Device.
+  // Estos botones siempre generarían falsos positivos como nombres de dispositivos.
+  const ACTION_BUTTON_RE =
+    /^(?:reproducir\s+sonido|silenciar|localizar|marcar\s+como\s+perdido|borrar\s+dispositivo|bloquear|play\s+sound|locate|lock|erase|find|secure\s+device|ring)$/i;
+
   // Estrategia 1: Analizar texto de la pagina buscando patrones de dispositivos
   function extractFromPageText() {
     const devices = [];
@@ -532,29 +587,48 @@
         .trim();
 
     allElements.forEach((el) => {
-      const text = el.textContent?.trim();
-      if (!text || text.length > 200 || text.length < 2) return;
+      const rawText = el.textContent?.trim();
+      if (!rawText || rawText.length > 200 || rawText.length < 2) return;
+
+      // Omitir elementos que son botones de acción de Find My Device (no son dispositivos)
+      const isActionButton =
+        el.tagName === 'BUTTON' ||
+        el.getAttribute('role') === 'button' ||
+        el.closest('button') !== null;
+
+      if (isActionButton) {
+        // Limpiar el texto de iconos antes de comparar con los patrones de acción
+        const cleanedForCheck = cleanElementText(el) || rawText;
+        if (ACTION_BUTTON_RE.test(cleanedForCheck.trim())) return;
+      }
 
       const looksLikeDevice =
-        devicePatterns.some((p) => p.test(text)) ||
+        devicePatterns.some((p) => p.test(rawText)) ||
         el.closest('[role="listitem"]') ||
         el.closest('[role="button"]');
 
       if (!looksLikeDevice) return;
 
       // Skip if text matches multiple device patterns (likely concatenated names)
-      const patternMatches = devicePatterns.filter(p => p.test(text)).length;
+      const patternMatches = devicePatterns.filter(p => p.test(rawText)).length;
       if (patternMatches > 1) return;
 
-      // Usar el texto como clave para evitar duplicados de nombres similares
-      const key = normalize(text);
+      // Limpiar el texto eliminando nombres de iconos Material Icon (snake_case)
+      const name = cleanElementText(el);
+      if (!name || name.length < 2 || name.length > 120) return;
+
+      // Omitir si después de limpiar sigue siendo un texto de acción
+      if (ACTION_BUTTON_RE.test(name)) return;
+
+      // Usar el nombre limpio como clave para evitar duplicados
+      const key = normalize(name);
       if (foundNames.has(key)) return;
       foundNames.add(key);
 
       // Buscar en el contenedor principal del dispositivo.
       // Subir en el DOM hasta encontrar el contenedor más pequeño que incluya el porcentaje de batería.
       const container = findBestContainer(el);
-      const containerText = container?.textContent || text;
+      const containerText = container?.textContent || rawText;
 
       const batteryMatch = containerText.match(batteryPattern);
       const timeMatch = containerText.match(timePattern);
@@ -564,7 +638,7 @@
 
       devices.push({
         id: `text-${devices.length}-${Date.now()}`,
-        name: text,
+        name,
         battery: batteryMatch ? parseInt(batteryMatch[1], 10) : null,
         lastSeen: timeMatch ? timeMatch[1] || timeMatch[0] : null,
         activity: statusMatch ? statusMatch[0] : null,
@@ -1322,15 +1396,24 @@
   async function notifyDashboard() {
     try {
       const devices = await extractDevices();
-      
-      // Merge con datos de red si existen
+
+      // Merge con datos de red si existen.
+      // Buscar coincidencia por nombre exacto O por primera palabra del nombre (p.ej. "Pixel 6a" ~ "Pixel")
       const mergedDevices = devices.map(device => {
-        const netData = networkData.find(nd => nd.name?.toLowerCase() === device.name.toLowerCase());
-        if (netData && netData.location && !device.location) {
+        if (device.location) return device; // ya tiene ubicación, no pisar
+        const nameLower = (device.name || '').toLowerCase();
+        const firstWord = nameLower.split(' ')[0];
+        const netData = networkData.find(nd => {
+          if (!nd.name) return false;
+          const ndName = nd.name.toLowerCase();
+          return ndName === nameLower || ndName.includes(firstWord) || nameLower.includes(ndName.split(' ')[0]);
+        });
+        if (netData && netData.location) {
           return { ...device, location: netData.location };
         }
         return device;
       });
+
       
       log('Notificando dashboard con', mergedDevices.length, 'dispositivos');
       

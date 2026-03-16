@@ -38,12 +38,13 @@ export function Dashboard() {
     openFindMyDevice,
   } = useExtension();
 
-  // Cambiar automáticamente al modo real cuando la extensión se conecta y devuelve dispositivos
+  // Actualizar lastRefresh cuando lleguen nuevos datos (fetch inicial o push update)
   useEffect(() => {
-    if (isConnected && devices.length > 0) {
+    if (devices.length > 0) {
       setLastRefresh(new Date());
     }
-  }, [isConnected, devices.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devices]);
 
   const handleRefresh = async () => {
     await fetchDevices();

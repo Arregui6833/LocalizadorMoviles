@@ -49,12 +49,22 @@ export function Dashboard() {
     }
   }, [useDemoMode]);
 
-  // Cambiar automáticamente al modo real cuando la extensión se conecta y devuelve dispositivos
+  // Cambiar automáticamente al modo real cuando la extensión envía dispositivos reales
+  // (sea via fetch después de conectar, o via push update del content script)
   useEffect(() => {
-    if (isConnected && realDevices.length > 0 && useDemoMode) {
+    if (realDevices.length > 0 && useDemoMode) {
       setUseDemoMode(false);
+      setLastRefresh(new Date());
     }
-  }, [isConnected, realDevices.length, useDemoMode]);
+  }, [realDevices.length, useDemoMode]);
+
+  // Actualizar lastRefresh cuando lleguen nuevos datos reales vía push
+  useEffect(() => {
+    if (!useDemoMode && realDevices.length > 0) {
+      setLastRefresh(new Date());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [realDevices]);
 
   const handleRefresh = async () => {
     if (!useDemoMode) {
