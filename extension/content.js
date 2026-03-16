@@ -47,16 +47,21 @@
     // Estrategia 4: Extraer de variables globales de la pagina
     const extractedFromGlobals = extractFromWindowGlobals();
 
+    // Estrategia 5: Atributo position="lat,lng" (Google Maps Web Components)
+    const extractedFromPosition = extractFromPositionAttributes();
+
     log('Desde texto:', extractedFromText.length);
     log('Desde elementos:', extractedFromInteractive.length);
     log('Desde red:', extractedFromNetwork.length);
     log('Desde globales:', extractedFromGlobals.length);
+    log('Desde atributo position:', extractedFromPosition.length);
 
     // Combinar resultados
     devices.push(...extractedFromText);
     devices.push(...extractedFromInteractive);
     devices.push(...extractedFromNetwork);
     devices.push(...extractedFromGlobals);
+    devices.push(...extractedFromPosition);
 
     // Eliminar duplicados por nombre/id
     const normalizeName = (name) => {
@@ -65,6 +70,7 @@
         .toLowerCase()
         .normalize("NFD")
         .replace(/\p{Diacritic}/gu, "")
+        .replace(/[^\p{L}\p{N}\s]/gu, "") // eliminar puntuación para evitar acumulación de "Galaxy S25" vs "Galaxy S25."
         .replace(/\s+/g, " ")
         .trim();
     };
@@ -130,6 +136,22 @@
       });
     }
 
+    // Asignar coordenadas anónimas de atributos [position] a dispositivos sin ubicación
+    if (positionCoords.length > 0) {
+      let posIdx = 0;
+      filteredDevices.forEach(device => {
+        if (!device.location && posIdx < positionCoords.length) {
+          const pc = positionCoords[posIdx++];
+          device.location = { lat: pc.lat, lng: pc.lng, address: null };
+          // Si el dispositivo no tiene batería y la coords anónima la tiene, usarla
+          if (device.battery == null && pc.battery != null) {
+            device.battery = pc.battery;
+          }
+          log('[position] Asignando coords anónimas a:', device.name, '→', pc.lat, pc.lng);
+        }
+      });
+    }
+
     // Si aún no hay ubicación, buscar coordenadas globales en la página
     const pageText = document.body.innerText;
     const globalCoords = extractCoordinatesFromText(pageText);
@@ -170,6 +192,19 @@
         stableDeviceCache.set(cacheKey, { ...cached, location: nd.location });
       }
     });
+
+    // Asignar coordenadas de [position] anónimas a entradas de caché sin ubicación
+    if (positionCoords.length > 0) {
+      let pi = 0;
+      for (const [key, cached] of stableDeviceCache) {
+        if (!cached.location && pi < positionCoords.length) {
+          const pc = positionCoords[pi++];
+          const updated = { ...cached, location: { lat: pc.lat, lng: pc.lng, address: null } };
+          if (cached.battery == null && pc.battery != null) updated.battery = pc.battery;
+          stableDeviceCache.set(key, updated);
+        }
+      }
+    }
 
     // Devolver la caché completa para que el dashboard vea TODOS los dispositivos conocidos
     // incluso cuando la SPA de Google FMD está en transición entre vistas
@@ -865,6 +900,40 @@
       }
     } catch (e) { /* ignorar */ }
 
+    // 0b) Buscar en el DOM un atributo `position="lat,lng"` (Google Maps Web Components)
+    try {
+      const COORD_RE = /^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/;
+      const posEls = searchRoot.querySelectorAll('[position]');
+      for (const pel of posEls) {
+        const pv = (pel.getAttribute('position') || '').trim();
+        const pm = pv.match(COORD_RE);
+        if (pm) {
+          const lat = parseFloat(pm[1]);
+          const lng = parseFloat(pm[2]);
+          if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+            log('Coordenadas extraídas de atributo [position]:', lat, lng);
+            return { lat, lng, address: null };
+          }
+        }
+      }
+      // Si el panel es document, buscar globalmente en todo el documento
+      if (panel === document) {
+        const allPosEls = document.querySelectorAll('[position]');
+        for (const pel of allPosEls) {
+          const pv = (pel.getAttribute('position') || '').trim();
+          const pm = pv.match(COORD_RE);
+          if (pm) {
+            const lat = parseFloat(pm[1]);
+            const lng = parseFloat(pm[2]);
+            if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+              log('Coordenadas globales desde atributo [position]:', lat, lng);
+              return { lat, lng, address: null };
+            }
+          }
+        }
+      }
+    } catch (e) { /* ignorar */ }
+
     // 1) Intentar extraer coordenadas del iframe de Google Maps
     const gmaps = searchRoot.querySelector('iframe[src*="maps"], .gm-style');
     if (gmaps) {
@@ -1045,6 +1114,30 @@
   // Extraer ubicacion
   function extractLocation(parent) {
     if (!parent) return null;
+
+    // 0) Atributo `position="lat,lng"` (Google Maps Web Components, gmp-advanced-marker, etc.)
+    const posAttr = parent.getAttribute('position') || '';
+    const posMatch = posAttr.match(/^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/);
+    if (posMatch) {
+      const lat = parseFloat(posMatch[1]);
+      const lng = parseFloat(posMatch[2]);
+      if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        return { lat, lng, address: null };
+      }
+    }
+    // Buscar descendiente con atributo position
+    const posEl = parent.querySelector('[position]');
+    if (posEl) {
+      const pv = (posEl.getAttribute('position') || '').trim();
+      const pm = pv.match(/^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/);
+      if (pm) {
+        const lat = parseFloat(pm[1]);
+        const lng = parseFloat(pm[2]);
+        if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+          return { lat, lng, address: null };
+        }
+      }
+    }
 
     // 1) Coordenadas en atributos data-*
     const lat = parent.getAttribute('data-lat') || parent.getAttribute('data-latitude');
@@ -1403,6 +1496,112 @@
     return devices;
   }
 
+  // Estrategia 5: Buscar elementos DOM con atributo `position="lat,lng"`.
+  // Google Find My Device coloca las coordenadas de cada dispositivo en un atributo
+  // `position` en elementos de tipo `gmp-advanced-marker` u otros componentes del mapa.
+  // Ejemplo: <gmp-advanced-marker position="42.8469401,-2.6796923" ...>
+  // También extrae la batería de atributos o texto cercano al mismo elemento.
+  //
+  // Devuelve dispositivos cuando tiene nombre real, y almacena las coords
+  // en `positionCoords` para asignarlas a dispositivos sin ubicación.
+  const positionCoords = []; // coords sin nombre, para asignación posterior
+
+  function extractFromPositionAttributes() {
+    const devices = [];
+    // Limpiar coords anteriores (se re-populan en cada llamada)
+    positionCoords.length = 0;
+
+    const candidates = document.querySelectorAll('[position]');
+    if (candidates.length === 0) return devices;
+
+    const COORD_RE = /^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/;
+    const BATTERY_RE = /(\d{1,3})\s*%/;
+
+    candidates.forEach((el, idx) => {
+      const posVal = (el.getAttribute('position') || '').trim();
+      const match = posVal.match(COORD_RE);
+      if (!match) return;
+
+      const lat = parseFloat(match[1]);
+      const lng = parseFloat(match[2]);
+      if (isNaN(lat) || isNaN(lng)) return;
+      if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return;
+
+      const location = { lat, lng, address: null };
+
+      // Intentar extraer el nombre del dispositivo desde el elemento o sus
+      // padres / hermanos más cercanos.
+      let name = null;
+      // 1) aria-label, title, data-name del propio elemento
+      name =
+        el.getAttribute('aria-label') ||
+        el.getAttribute('title') ||
+        el.getAttribute('data-name') ||
+        el.getAttribute('alt') ||
+        null;
+      // 2) Si no, buscar en los hijos del elemento
+      if (!name) {
+        const textChild = el.querySelector('[aria-label], [title], .device-name, h1, h2, h3, strong');
+        if (textChild) {
+          name = textChild.getAttribute('aria-label') || textChild.getAttribute('title') || textChild.textContent?.trim() || null;
+        }
+      }
+      // 3) Si aún no, ir al padre y buscar texto que parezca nombre de dispositivo
+      if (!name) {
+        let ancestor = el.parentElement;
+        let levels = 0;
+        while (ancestor && levels < 6) {
+          const ancestorLabel = ancestor.getAttribute('aria-label') || ancestor.getAttribute('title');
+          if (ancestorLabel && ancestorLabel.length > 1 && ancestorLabel.length < 120) {
+            name = ancestorLabel;
+            break;
+          }
+          ancestor = ancestor.parentElement;
+          levels++;
+        }
+      }
+      // Limpiar el nombre
+      if (name) {
+        name = trimDeviceName(name);
+      }
+
+      // Extraer batería desde el elemento hacia arriba
+      let battery = null;
+      let searchEl = el;
+      for (let i = 0; i < 6 && searchEl; i++) {
+        const al = searchEl.getAttribute('aria-label') || '';
+        const bma = al.match(BATTERY_RE);
+        if (bma) { battery = parseInt(bma[1], 10); break; }
+        const t = searchEl.textContent || '';
+        const bm = t.match(BATTERY_RE);
+        if (bm) { battery = parseInt(bm[1], 10); break; }
+        searchEl = searchEl.parentElement;
+      }
+
+      if (name && name.length >= 2 && name.length <= 120) {
+        // Tiene nombre real → crear dispositivo completo
+        log(`[position] Encontrado con nombre: ${name} → lat:${lat} lng:${lng} bat:${battery}`);
+        devices.push({
+          id: `pos-${idx}-${Date.now()}`,
+          name,
+          battery,
+          lastSeen: null,
+          activity: null,
+          location,
+          isOnline: true,
+          source: 'position-attr',
+          extractedAt: new Date().toISOString(),
+        });
+      } else {
+        // Sin nombre → almacenar coords como candidato anónimo para asignar a otros dispositivos
+        log(`[position] Coords sin nombre: lat:${lat} lng:${lng}`);
+        positionCoords.push({ lat, lng, battery });
+      }
+    });
+
+    return devices;
+  }
+
   // Marcadores capturados del API de Google Maps
   const mapMarkers = [];
 
@@ -1733,7 +1932,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['data-device-id', 'data-lat', 'data-lng', 'data-battery']
+      attributeFilter: ['data-device-id', 'data-lat', 'data-lng', 'data-battery', 'position']
     });
   }
 
