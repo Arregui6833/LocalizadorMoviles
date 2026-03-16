@@ -17,6 +17,19 @@
     if (DEBUG) console.log('[DeviceTracker]', ...args);
   }
 
+  // Determinar si la pestaña actual es la página de Google Find My Device.
+  // El content script se inyecta también en el dashboard (localhost/vercel), así
+  // que hay que limitar las operaciones de extracción y clic a la página correcta.
+  function isFindMyDevicePage() {
+    const host = window.location.hostname;
+    const path = window.location.pathname;
+    return (
+      (host === 'www.google.com' && path.includes('/android/find')) ||
+      host === 'findmydevice.google.com' ||
+      (host === 'android.google.com' && path.startsWith('/find'))
+    );
+  }
+
   // Funcion principal para extraer dispositivos
   async function extractDevices() {
     log('Extrayendo dispositivos...');
@@ -71,7 +84,7 @@
       const idKey = !isGeneratedId(device.id) ? device.id : null;
       const key = idKey || nameKey;
 
-      if (!nameKey) return;
+      if (!key) return;
 
       const existing = map.get(key);
       if (!existing) {
@@ -1457,6 +1470,12 @@
         sendResponse({ status: 'stopped' });
         return true;
       }
+
+      if (message.type === 'ANALYZE_DOM') {
+        const analysis = analyzeDOMStructure();
+        sendResponse({ analysis });
+        return true;
+      }
     } catch (e) {
       log('Error en chrome.runtime.onMessage listener:', e.message);
       sendResponse({ error: e.message });
@@ -1531,7 +1550,8 @@
     }
   }
 
-  // Observador de mutaciones para detectar cambios en el DOM
+  // Observador de mutaciones para detectar cambios en el DOM.
+  // Solo tiene sentido en la página de Find My Device.
   const observer = new MutationObserver((mutations) => {
     if (isMonitoring) {
       // Debounce
@@ -1542,13 +1562,15 @@
     }
   });
 
-  // Iniciar observador cuando la pagina cargue
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    attributeFilter: ['data-device-id', 'data-lat', 'data-lng', 'data-battery']
-  });
+  // Iniciar observador solo en la página de Find My Device
+  if (isFindMyDevicePage()) {
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-device-id', 'data-lat', 'data-lng', 'data-battery']
+    });
+  }
 
   // Funcion para analizar y volcar la estructura del DOM (debug)
   function analyzeDOMStructure() {
@@ -1623,17 +1645,8 @@
     };
   }
   
-  // Agregar listener para solicitar analisis de DOM
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'ANALYZE_DOM') {
-      const analysis = analyzeDOMStructure();
-      sendResponse({ analysis });
-    }
-    return true;
-  });
-
   // Notificar que la extension esta lista
-  console.log('[Device Tracker] Extension loaded on Find My Device');
+  console.log('[Device Tracker] Extension loaded -', isFindMyDevicePage() ? 'Find My Device' : 'Dashboard');
   log('Ejecuta analyzeDOMStructure() en la consola para ver la estructura del DOM');
   
   // Exponer funcion globalmente para debug
@@ -1641,33 +1654,40 @@
   window.__deviceTrackerSimulateClicks = simulateUserClicks;
   window.__deviceTrackerNetworkData = () => getNetworkData();
 
-  // Enganchar el API de Google Maps lo antes posible
-  hookGoogleMapsAPI();
-  
-  // Iniciar monitoreo automaticamente con delay mayor para esperar carga
-  setTimeout(() => {
-    log('=== INICIANDO SISTEMA DE EXTRACCIÓN DE DISPOSITIVOS ===');
-    log('Tiempo de espera completado, iniciando análisis...');
-    
-    // Análisis de DOM
-    const analysis = analyzeDOMStructure();
-    log('Análisis de DOM completado:', analysis);
-    
-    // Iniciar extracción de dispositivos
-    extractDevices().then(devices => {
-      log('Dispositivos iniciales extraídos:', devices.length);
-      devices.forEach(d => {
-        log(`  - ${d.name} (${d.source}) | Batería: ${d.battery}% | Ubicación: ${d.location ? 'sí' : 'no'}`);
+  // Las operaciones de extracción, clic y monitoreo sólo tienen sentido en la página
+  // de Google Find My Device. En el dashboard (localhost, vercel, etc.) el content script
+  // sólo actúa como puente de mensajes (chrome.runtime.onMessage → window.postMessage).
+  if (isFindMyDevicePage()) {
+    // Enganchar el API de Google Maps lo antes posible
+    hookGoogleMapsAPI();
+
+    // Iniciar monitoreo automaticamente con delay mayor para esperar carga
+    setTimeout(() => {
+      log('=== INICIANDO SISTEMA DE EXTRACCIÓN DE DISPOSITIVOS ===');
+      log('Tiempo de espera completado, iniciando análisis...');
+
+      // Análisis de DOM
+      const analysis = analyzeDOMStructure();
+      log('Análisis de DOM completado:', analysis);
+
+      // Iniciar extracción de dispositivos
+      extractDevices().then(devices => {
+        log('Dispositivos iniciales extraídos:', devices.length);
+        devices.forEach(d => {
+          log(`  - ${d.name} (${d.source}) | Batería: ${d.battery}% | Ubicación: ${d.location ? 'sí' : 'no'}`);
+        });
       });
-    });
-    
-    // Iniciar monitoreo continuo
-    startMonitoring(5000);
-    log('Monitoreo continuo iniciado');
-    
-    // Notificar al dashboard
-    notifyDashboard();
-    log('Notificación inicial enviada al dashboard');
-  }, 4000);
+
+      // Iniciar monitoreo continuo
+      startMonitoring(5000);
+      log('Monitoreo continuo iniciado');
+
+      // Notificar al dashboard
+      notifyDashboard();
+      log('Notificación inicial enviada al dashboard');
+    }, 4000);
+  } else {
+    log('Dashboard detectado: sólo actuando como puente de mensajes');
+  }
 
 })();
