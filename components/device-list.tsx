@@ -79,7 +79,7 @@ function DeviceCard({ device, isSelected, onClick }: DeviceCardProps) {
     if (!lastSeen) return "Desconocido";
 
     // Si ya es un texto relativo (ej. "hace 5 minutos"), devolverlo tal cual
-    if (/hace|last seen|\u00faltima vez|ultima vez/i.test(lastSeen)) return lastSeen;
+    if (/hace|last seen|\u00faltima vez/i.test(lastSeen)) return lastSeen;
 
     const date = new Date(lastSeen);
     if (isNaN(date.getTime())) return lastSeen; // devolver texto si no es fecha válida

@@ -8,6 +8,8 @@
   let lastDevices = [];
   let isMonitoring = false;
   let monitorInterval = null;
+  // Guard para evitar simulaciones de clics concurrentes
+  let isClickingDevices = false;
 
   // Debug mode
   const DEBUG = true;
@@ -62,11 +64,12 @@
     const map = new Map();
 
     devices.forEach((device) => {
-      // Create a more unique key using name, battery, and lastSeen
+      // Usar solo el nombre normalizado como clave de deduplicación.
+      // Incluir battery/lastSeen en la clave causaría duplicados cuando esos valores
+      // difieren entre estrategias de extracción (p.ej. text-scan vs. network).
       const nameKey = normalizeName(device.name);
-      const batteryKey = device.battery || 'no-battery';
-      const lastSeenKey = device.lastSeen || 'no-lastseen';
-      const key = `${nameKey}|${batteryKey}|${lastSeenKey}`;
+      const idKey = !isGeneratedId(device.id) ? device.id : null;
+      const key = idKey || nameKey;
 
       if (!nameKey) return;
 
@@ -135,184 +138,199 @@
     return filteredDevices;
   }
 
-  // Función para simular clics en dispositivos de forma segura
+  // Helper: delay en ms
+  function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // Helper: click un elemento con MouseEvent completo
+  function clickElement(el) {
+    if (!el) return;
+    try {
+      const rect = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        buttons: 1,
+        clientX: rect.left + 10,
+        clientY: rect.top + 10
+      }));
+      if (typeof el.click === 'function') el.click();
+    } catch (e) {
+      log('Error al clickear elemento:', e.message);
+    }
+  }
+
+  // Función para simular clics en dispositivos de forma segura.
+  // RE-BUSCA los contenedores en el DOM en cada iteración para evitar
+  // referencias obsoletas después de que la SPA de Google navegue.
   async function simulateUserClicks(devices) {
+    if (isClickingDevices) {
+      log('Simulación de clics ya en progreso, saltando...');
+      return;
+    }
+
     if (!devices || devices.length === 0) return;
-    
+
+    isClickingDevices = true;
     log('Iniciando simulación de clics en', devices.length, 'dispositivos');
-    
-    // Paso 1: Buscar todos los contenedores de dispositivos
-    const deviceContainers = findAllDeviceContainers();
-    log('Contenedores de dispositivos encontrados:', deviceContainers.length);
-    
-    if (deviceContainers.length === 0) {
-      log('No se encontraron contenedores de dispositivos');
-      return;
-    }
-    
-    // Paso 2: Mapear dispositivos a contenedores
-    const mappedDevices = [];
-    devices.forEach(device => {
-      const deviceName = device.name?.trim().toLowerCase() || '';
-      
-      // Buscar el contenedor que contiene este nombre
-      const container = deviceContainers.find(cont => {
-        const containerText = cont.textContent?.toLowerCase() || '';
-        return containerText.includes(deviceName);
-      });
-      
-      if (container) {
-        mappedDevices.push({
-          device,
-          container
-        });
-        log('Dispositivo mapeado:', device.name);
-      }
-    });
-    
-    log('Dispositivos mapeados:', mappedDevices.length, '/', devices.length);
-    
-    if (mappedDevices.length === 0) {
-      log('No se pudieron mapear dispositivos a contenedores');
-      return;
-    }
-    
-    // Paso 3: Hacer clic en cada dispositivo secuencialmente
-    for (let i = 0; i < mappedDevices.length; i++) {
-      const { device, container } = mappedDevices[i];
-      
-      try {
-        log('=== DISPOSITIVO', i + 1, '/', mappedDevices.length, ':', device.name, '===');
-        
-        // PASO A: Hacer clic en el dispositivo para entrar en vista detallada
-        log('PASO A: Haciendo clic en dispositivo para ver detalles');
-        let clickableElement = findClickableElementInList(container);
-        
-        if (!clickableElement) {
-          log('❌ No se encontró elemento clickeable para', device.name);
-          continue;
-        }
-        
-        // Scroll a la vista si es necesario
-        clickableElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        await new Promise(resolve => setTimeout(resolve, 300));
-        
-        // Simular evento de click con todos los parámetros necesarios
-        const clickEvent = new MouseEvent('click', {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          buttons: 1,
-          clientX: clickableElement.getBoundingClientRect().left + 10,
-          clientY: clickableElement.getBoundingClientRect().top + 10
-        });
-        
-        clickableElement.dispatchEvent(clickEvent);
-        
-        if (typeof clickableElement.click === 'function') {
-          await new Promise(resolve => setTimeout(resolve, 100));
-          clickableElement.click();
-        }
-        
-        log('✓ Click enviado, esperando carga de detalles...');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // PASO B: Esperar a que se capture la ubicación
-        log('PASO B: Esperando captura de ubicación desde API');
-        let locationCaptured = false;
-        let captureWaitTime = 0;
-        const MAX_WAIT = 5000; // máximo 5 segundos
-        
-        while (!locationCaptured && captureWaitTime < MAX_WAIT) {
-          const currentDeviceData = lastDevices.find(d => 
-            d.name?.toLowerCase() === device.name?.toLowerCase()
-          );
-          
-          if (currentDeviceData && currentDeviceData.location && 
-              currentDeviceData.location.lat && currentDeviceData.location.lng) {
-            log('✓ Ubicación capturada:', currentDeviceData.location);
-            locationCaptured = true;
+
+    try {
+      for (let i = 0; i < devices.length; i++) {
+        const device = devices[i];
+        const deviceName = (device.name || '').toLowerCase().trim();
+
+        if (!deviceName) continue;
+
+        log('=== DISPOSITIVO', i + 1, '/', devices.length, ':', device.name, '===');
+
+        try {
+          // PASO A: Asegurarse de estar en la vista de lista.
+          // Si hay un botón Back visible, estamos en vista detallada → volver.
+          const existingBack = findBackButton();
+          if (existingBack) {
+            log('Vista de detalle detectada, volviendo a lista...');
+            clickElement(existingBack);
+            await delay(2000);
+          }
+
+          // PASO B: Buscar el contenedor del dispositivo en el DOM ACTUAL (frescos, no caché).
+          // Esto es esencial porque la SPA de Google re-renderiza los elementos al navegar.
+          const freshContainers = findAllDeviceContainers();
+          log('Contenedores frescos en el DOM:', freshContainers.length);
+
+          if (freshContainers.length === 0) {
+            log('❌ No hay contenedores en el DOM actual, abortando recorrido');
             break;
           }
-          
-          await new Promise(resolve => setTimeout(resolve, 500));
-          captureWaitTime += 500;
-        }
-        
-        if (!locationCaptured) {
-          log('⚠ Ubicación no capturada después de', MAX_WAIT, 'ms');
-        } else {
-          log('✓ Ubicación confirmada para', device.name);
-        }
-        
-        // PASO C: Hacer clic en botón "Back" para volver a la lista
-        log('PASO C: Haciendo clic en botón Back para volver a la lista');
-        const backButton = findBackButton();
-        
-        if (backButton) {
-          log('✓ Botón Back encontrado, clickeando...');
-          backButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          await new Promise(resolve => setTimeout(resolve, 200));
-          
-          const backClickEvent = new MouseEvent('click', {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            buttons: 1,
-            clientX: backButton.getBoundingClientRect().left + 10,
-            clientY: backButton.getBoundingClientRect().top + 10
+
+          // Buscar el contenedor que tenga el nombre (o alguna palabra clave del nombre)
+          const container = freshContainers.find(cont => {
+            const text = cont.textContent?.toLowerCase().trim() || '';
+            if (text.includes(deviceName)) return true;
+            // Coincidencia parcial: usar palabras de más de 2 caracteres del nombre
+            return deviceName.split(' ')
+              .filter(w => w.length > 2)
+              .some(w => text.includes(w));
           });
-          
-          backButton.dispatchEvent(backClickEvent);
-          
-          if (typeof backButton.click === 'function') {
-            await new Promise(resolve => setTimeout(resolve, 100));
-            backButton.click();
+
+          if (!container) {
+            log('❌ Contenedor no encontrado para:', device.name);
+            continue;
           }
-          
-          log('✓ Click en Back enviado, esperando vuelta a lista...');
-          await new Promise(resolve => setTimeout(resolve, 1500));
-        } else {
-          log('❌ Botón Back no encontrado');
+
+          // PASO C: Hacer clic en el elemento clickeable del contenedor
+          const clickable = findClickableElementInList(container);
+          if (!clickable) {
+            log('❌ Elemento clickeable no encontrado para:', device.name);
+            continue;
+          }
+
+          log('PASO C: Haciendo clic en dispositivo:', device.name);
+          clickable.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await delay(300);
+          clickElement(clickable);
+
+          log('✓ Click enviado, esperando carga de detalles...');
+          await delay(2000);
+
+          // PASO D: Esperar captura de datos de ubicación desde la API interceptada
+          log('PASO D: Esperando captura de ubicación desde API...');
+          let locationCaptured = false;
+          for (let t = 0; t < 5000; t += 500) {
+            const netDevice = networkData.find(d =>
+              d.name?.toLowerCase() === deviceName ||
+              d.name?.toLowerCase().includes(deviceName.split(' ')[0])
+            );
+            if (netDevice?.location?.lat && netDevice?.location?.lng) {
+              locationCaptured = true;
+              log('✓ Ubicación capturada desde red:', netDevice.location);
+              break;
+            }
+            await delay(500);
+          }
+
+          if (!locationCaptured) {
+            log('⚠ Ubicación no capturada en 5s para:', device.name);
+          }
+
+          // PASO E: Volver a la lista haciendo clic en Back
+          log('PASO E: Volviendo a la lista...');
+          const backButton = findBackButton();
+          if (backButton) {
+            log('✓ Botón Back encontrado, clickeando...');
+            clickElement(backButton);
+            await delay(2000);
+            log('✓ Regresado a la lista');
+          } else {
+            log('❌ Botón Back no encontrado, usando history.back()...');
+            window.history.back();
+            await delay(2000);
+          }
+
+          log('✓ Dispositivo completado:', device.name);
+
+        } catch (e) {
+          log('❌ Error procesando dispositivo', device.name, ':', e.message);
+          // Recuperación: intentar volver a la lista
+          try {
+            const backBtn = findBackButton();
+            if (backBtn) { clickElement(backBtn); await delay(1500); }
+            else { window.history.back(); await delay(1500); }
+          } catch (e2) { /* ignorar */ }
         }
-        
-        log('✓ Dispositivo completado:', device.name);
-        log('');
-        
-      } catch (e) {
-        log('❌ Error al procesar dispositivo', device.name, ':', e.message);
       }
+
+      log('=== Completados todos los clics en dispositivos ===');
+
+    } finally {
+      isClickingDevices = false;
     }
-    
-    log('=== Completados todos los clics en dispositivos ===');
   }
 
   // Encontrar el botón "Back" en la vista detallada
   function findBackButton() {
-    // El botón Back tiene aria-label="Back"
-    const backButton = document.querySelector('button[aria-label="Back"]');
-    if (backButton) {
-      log('Botón Back encontrado con aria-label');
-      return backButton;
-    }
-    
-    // Fallback: buscar por clase y contenido
-    const buttons = document.querySelectorAll('button');
-    for (const btn of buttons) {
-      const hasArrow = btn.querySelector('[aria-hidden="true"] i.google-material-icons:contains("arrow_back")');
-      if (hasArrow || btn.innerText?.toLowerCase().includes('back')) {
-        log('Botón Back encontrado por icono/texto');
+    // Selectores directos más comunes en Google Find My Device
+    const directSelectors = [
+      'button[aria-label="Back"]',
+      'button[aria-label="Atrás"]',
+      'button[aria-label="back"]',
+      'button[aria-label="atras"]',
+      '[jsname="LgbsSe"][aria-label*="Back"]',
+      '[jsname="LgbsSe"][aria-label*="Atrás"]',
+      '.VYBDae-Bz112c-LgbsSe[aria-label*="Back"]',
+      '.VYBDae-Bz112c-LgbsSe[aria-label*="Atrás"]',
+    ];
+
+    for (const sel of directSelectors) {
+      const btn = document.querySelector(sel);
+      if (btn) {
+        log('Botón Back encontrado con selector:', sel);
         return btn;
       }
     }
-    
-    // Fallback: buscar por posición (primer botón en esquina superior izquierda)
-    const topLeftButton = document.querySelector('.VYBDae-Bz112c-LgbsSe');
-    if (topLeftButton && topLeftButton.getAttribute('aria-label')?.toLowerCase().includes('back')) {
-      log('Botón Back encontrado por posición');
-      return topLeftButton;
+
+    // Fallback: recorrer todos los botones buscando aria-label con "back"/"atrás"
+    // o un icono de flecha hacia atrás
+    const allButtons = document.querySelectorAll('button, [role="button"]');
+    for (const btn of allButtons) {
+      const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+      if (label.includes('back') || label.includes('atrás') || label.includes('atras')) {
+        log('Botón Back encontrado por aria-label:', btn.getAttribute('aria-label'));
+        return btn;
+      }
+      // Buscar icono de material "arrow_back" dentro del botón
+      const icons = btn.querySelectorAll('i, .google-material-icons, .material-icons, [class*="icon"]');
+      for (const icon of icons) {
+        const iconText = (icon.textContent || '').trim();
+        if (iconText === 'arrow_back' || iconText === 'arrow_back_ios') {
+          log('Botón Back encontrado por icono de material');
+          return btn;
+        }
+      }
     }
-    
+
     return null;
   }
 
@@ -1403,6 +1421,21 @@
   // Escuchar mensajes del background script
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
+      // Reenviar DEVICES_UPDATE y DEVICES_CHANGED a la página web via postMessage.
+      // Esto es necesario cuando este content script está inyectado en el dashboard
+      // (localhost, etc.) y el background envía actualizaciones al tab del dashboard.
+      if (message.type === 'DEVICES_UPDATE' || message.type === 'DEVICES_CHANGED') {
+        window.postMessage(
+          {
+            ...message,
+            source: EXTENSION_ID,
+          },
+          '*'
+        );
+        sendResponse({ forwarded: true });
+        return true;
+      }
+
       if (message.type === 'GET_DEVICES') {
         extractDevices().then(devices => {
           sendResponse({ devices });

@@ -32,6 +32,9 @@ interface ExtensionState {
 // ID de la extension - el usuario debe actualizarlo despues de instalar
 const DEFAULT_EXTENSION_ID = "YOUR_EXTENSION_ID_HERE";
 
+// Identificador que el content script incluye en los mensajes postMessage
+const EXTENSION_WINDOW_SOURCE = "device-tracker-monitor";
+
 export function useExtension(extensionId?: string) {
   const [state, setState] = useState<ExtensionState>({
     isConnected: false,
@@ -222,7 +225,7 @@ export function useExtension(extensionId?: string) {
     checkConnection();
   }, [checkConnection]);
 
-  // Escuchar mensajes de la extension
+  // Escuchar mensajes de la extension via chrome.runtime (funciona en popups/páginas privilegiadas)
   useEffect(() => {
     if (typeof chrome === "undefined" || !chrome.runtime) return;
 
@@ -248,6 +251,37 @@ export function useExtension(extensionId?: string) {
       chrome.runtime.onMessage.removeListener(handleMessage);
     };
   }, []);
+
+  // Escuchar actualizaciones push del content script via window.postMessage.
+  // El content script inyectado en el dashboard reenvía los mensajes DEVICES_UPDATE
+  // del background a la página web usando este canal (chrome.runtime no está
+  // disponible directamente en páginas web normales).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handlePushMessage = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== EXTENSION_WINDOW_SOURCE) return;
+      // Ignorar mensajes que son respuestas a solicitudes (tienen requestId)
+      if (data.requestId) return;
+
+      if (data.type === "DEVICES_UPDATE" || data.type === "DEVICES_CHANGED") {
+        if (data.devices) {
+          setState((prev) => ({
+            ...prev,
+            devices: data.devices,
+            lastUpdate: data.timestamp || Date.now(),
+            isConnected: true,
+            isLoading: false,
+          }));
+        }
+      }
+    };
+
+    window.addEventListener("message", handlePushMessage);
+    return () => window.removeEventListener("message", handlePushMessage);
+  }, []); // deps vacío: registrar una vez, la closure usa el setState estable de React
 
   return {
     ...state,
