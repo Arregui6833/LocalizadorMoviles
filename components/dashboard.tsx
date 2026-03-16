@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { DeviceMap } from "@/components/device-map";
 import { DeviceList } from "@/components/device-list";
 import { ExtensionSetup } from "@/components/extension-setup";
-import { useExtension, useDemoDevices } from "@/hooks/use-extension";
+import { useExtension } from "@/hooks/use-extension";
 import {
   RefreshCw,
   Settings,
@@ -23,14 +23,13 @@ export function Dashboard() {
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const [useDemoMode, setUseDemoMode] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const {
     isConnected,
     isLoading,
     error,
-    devices: realDevices,
+    devices,
     extensionId,
     setExtensionId,
     fetchDevices,
@@ -39,27 +38,15 @@ export function Dashboard() {
     openFindMyDevice,
   } = useExtension();
 
-  const demoDevices = useDemoDevices();
-  const devices = useDemoMode ? demoDevices : realDevices;
-
-  // Auto-refresh en modo demo
-  useEffect(() => {
-    if (useDemoMode) {
-      setLastRefresh(new Date());
-    }
-  }, [useDemoMode]);
-
   // Cambiar automáticamente al modo real cuando la extensión se conecta y devuelve dispositivos
   useEffect(() => {
-    if (isConnected && realDevices.length > 0 && useDemoMode) {
-      setUseDemoMode(false);
+    if (isConnected && devices.length > 0) {
+      setLastRefresh(new Date());
     }
-  }, [isConnected, realDevices.length, useDemoMode]);
+  }, [isConnected, devices.length]);
 
   const handleRefresh = async () => {
-    if (!useDemoMode) {
-      await fetchDevices();
-    }
+    await fetchDevices();
     setLastRefresh(new Date());
   };
 
@@ -94,48 +81,35 @@ export function Dashboard() {
               <div>
                 <h1 className="font-semibold text-lg">Device Tracker</h1>
                 <p className="text-muted-foreground text-xs">
-                  {useDemoMode ? "Modo Demo" : isConnected ? "Conectado" : "Desconectado"}
+                  {isConnected ? "Conectado" : "Desconectado"}
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2">
-              {/* Toggle Demo/Real */}
               <Button
                 variant="outline"
-                size="sm"
-                onClick={() => setUseDemoMode(!useDemoMode)}
+                size="icon"
+                onClick={handleToggleMonitoring}
+                disabled={!isConnected}
               >
-                {useDemoMode ? "Usar Extension" : "Modo Demo"}
+                {isMonitoring ? (
+                  <Pause className="w-4 h-4" />
+                ) : (
+                  <Play className="w-4 h-4" />
+                )}
               </Button>
 
-              {!useDemoMode && (
-                <>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={handleToggleMonitoring}
-                    disabled={!isConnected}
-                  >
-                    {isMonitoring ? (
-                      <Pause className="w-4 h-4" />
-                    ) : (
-                      <Play className="w-4 h-4" />
-                    )}
-                  </Button>
-
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    onClick={handleRefresh}
-                    disabled={isLoading}
-                  >
-                    <RefreshCw
-                      className={cn("w-4 h-4", isLoading && "animate-spin")}
-                    />
-                  </Button>
-                </>
-              )}
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={handleRefresh}
+                disabled={isLoading}
+              >
+                <RefreshCw
+                  className={cn("w-4 h-4", isLoading && "animate-spin")}
+                />
+              </Button>
 
               <Button
                 variant="outline"
@@ -151,7 +125,7 @@ export function Dashboard() {
 
       <main className="container mx-auto px-4 py-6">
         {/* Settings Panel */}
-        {showSettings && !useDemoMode && (
+        {showSettings && (
           <div className="mb-6">
             <ExtensionSetup
               extensionId={extensionId || ""}

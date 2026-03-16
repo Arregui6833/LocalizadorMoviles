@@ -16,7 +16,7 @@
   }
 
   // Funcion principal para extraer dispositivos
-  function extractDevices() {
+  async function extractDevices() {
     log('Extrayendo dispositivos...');
     const devices = [];
     
@@ -62,11 +62,13 @@
     const map = new Map();
 
     devices.forEach((device) => {
+      // Create a more unique key using name, battery, and lastSeen
       const nameKey = normalizeName(device.name);
-      const idKey = !isGeneratedId(device.id) ? device.id : null;
-      const key = idKey || nameKey;
+      const batteryKey = device.battery || 'no-battery';
+      const lastSeenKey = device.lastSeen || 'no-lastseen';
+      const key = `${nameKey}|${batteryKey}|${lastSeenKey}`;
 
-      if (!key) return;
+      if (!nameKey) return;
 
       const existing = map.get(key);
       if (!existing) {
@@ -92,10 +94,15 @@
 
     const uniqueDevices = Array.from(map.values());
 
+    // Filter out devices with no useful info (likely false positives)
+    const filteredDevices = uniqueDevices.filter(device => 
+      device.name && device.name.length > 1 && device.name.length < 100
+    );
+
     // Si hay marcadores de Google Maps y algún dispositivo no tiene ubicación, intentar asignar
     if (mapMarkers.length > 0) {
       let markerIdx = 0;
-      uniqueDevices.forEach(device => {
+      filteredDevices.forEach(device => {
         if (!device.location && markerIdx < mapMarkers.length) {
           device.location = {
             lat: mapMarkers[markerIdx].lat,
@@ -107,8 +114,345 @@
       });
     }
 
-    log('Dispositivos unicos encontrados:', uniqueDevices.length, uniqueDevices);
-    return uniqueDevices;
+    // Si aún no hay ubicación, buscar coordenadas globales en la página
+    const pageText = document.body.innerText;
+    const globalCoords = extractCoordinatesFromText(pageText);
+    if (globalCoords) {
+      filteredDevices.forEach(device => {
+        if (!device.location) {
+          device.location = globalCoords;
+        }
+      });
+    }
+
+    // Intentar hacer clic en dispositivos para extraer ubicaciones
+    // Esto se hace de forma segura y con manejo de errores
+    if (filteredDevices.length > 0) {
+      simulateUserClicks(filteredDevices);
+    }
+
+    log('Dispositivos finales:', filteredDevices.length, filteredDevices);
+    return filteredDevices;
+  }
+
+  // Función para simular clics en dispositivos de forma segura
+  async function simulateUserClicks(devices) {
+    if (!devices || devices.length === 0) return;
+    
+    log('Iniciando simulación de clics en', devices.length, 'dispositivos');
+    
+    // Paso 1: Buscar todos los contenedores de dispositivos
+    const deviceContainers = findAllDeviceContainers();
+    log('Contenedores de dispositivos encontrados:', deviceContainers.length);
+    
+    if (deviceContainers.length === 0) {
+      log('No se encontraron contenedores de dispositivos');
+      return;
+    }
+    
+    // Paso 2: Mapear dispositivos a contenedores
+    const mappedDevices = [];
+    devices.forEach(device => {
+      const deviceName = device.name?.trim().toLowerCase() || '';
+      
+      // Buscar el contenedor que contiene este nombre
+      const container = deviceContainers.find(cont => {
+        const containerText = cont.textContent?.toLowerCase() || '';
+        return containerText.includes(deviceName);
+      });
+      
+      if (container) {
+        mappedDevices.push({
+          device,
+          container
+        });
+        log('Dispositivo mapeado:', device.name);
+      }
+    });
+    
+    log('Dispositivos mapeados:', mappedDevices.length, '/', devices.length);
+    
+    if (mappedDevices.length === 0) {
+      log('No se pudieron mapear dispositivos a contenedores');
+      return;
+    }
+    
+    // Paso 3: Hacer clic en cada dispositivo secuencialmente
+    for (let i = 0; i < mappedDevices.length; i++) {
+      const { device, container } = mappedDevices[i];
+      
+      try {
+        log('=== DISPOSITIVO', i + 1, '/', mappedDevices.length, ':', device.name, '===');
+        
+        // PASO A: Hacer clic en el dispositivo para entrar en vista detallada
+        log('PASO A: Haciendo clic en dispositivo para ver detalles');
+        let clickableElement = findClickableElementInList(container);
+        
+        if (!clickableElement) {
+          log('❌ No se encontró elemento clickeable para', device.name);
+          continue;
+        }
+        
+        // Scroll a la vista si es necesario
+        clickableElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        // Simular evento de click con todos los parámetros necesarios
+        const clickEvent = new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          buttons: 1,
+          clientX: clickableElement.getBoundingClientRect().left + 10,
+          clientY: clickableElement.getBoundingClientRect().top + 10
+        });
+        
+        clickableElement.dispatchEvent(clickEvent);
+        
+        if (typeof clickableElement.click === 'function') {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          clickableElement.click();
+        }
+        
+        log('✓ Click enviado, esperando carga de detalles...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // PASO B: Esperar a que se capture la ubicación
+        log('PASO B: Esperando captura de ubicación desde API');
+        let locationCaptured = false;
+        let captureWaitTime = 0;
+        const MAX_WAIT = 5000; // máximo 5 segundos
+        
+        while (!locationCaptured && captureWaitTime < MAX_WAIT) {
+          const currentDeviceData = lastDevices.find(d => 
+            d.name?.toLowerCase() === device.name?.toLowerCase()
+          );
+          
+          if (currentDeviceData && currentDeviceData.location && 
+              currentDeviceData.location.lat && currentDeviceData.location.lng) {
+            log('✓ Ubicación capturada:', currentDeviceData.location);
+            locationCaptured = true;
+            break;
+          }
+          
+          await new Promise(resolve => setTimeout(resolve, 500));
+          captureWaitTime += 500;
+        }
+        
+        if (!locationCaptured) {
+          log('⚠ Ubicación no capturada después de', MAX_WAIT, 'ms');
+        } else {
+          log('✓ Ubicación confirmada para', device.name);
+        }
+        
+        // PASO C: Hacer clic en botón "Back" para volver a la lista
+        log('PASO C: Haciendo clic en botón Back para volver a la lista');
+        const backButton = findBackButton();
+        
+        if (backButton) {
+          log('✓ Botón Back encontrado, clickeando...');
+          backButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await new Promise(resolve => setTimeout(resolve, 200));
+          
+          const backClickEvent = new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            buttons: 1,
+            clientX: backButton.getBoundingClientRect().left + 10,
+            clientY: backButton.getBoundingClientRect().top + 10
+          });
+          
+          backButton.dispatchEvent(backClickEvent);
+          
+          if (typeof backButton.click === 'function') {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            backButton.click();
+          }
+          
+          log('✓ Click en Back enviado, esperando vuelta a lista...');
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        } else {
+          log('❌ Botón Back no encontrado');
+        }
+        
+        log('✓ Dispositivo completado:', device.name);
+        log('');
+        
+      } catch (e) {
+        log('❌ Error al procesar dispositivo', device.name, ':', e.message);
+      }
+    }
+    
+    log('=== Completados todos los clics en dispositivos ===');
+  }
+
+  // Encontrar el botón "Back" en la vista detallada
+  function findBackButton() {
+    // El botón Back tiene aria-label="Back"
+    const backButton = document.querySelector('button[aria-label="Back"]');
+    if (backButton) {
+      log('Botón Back encontrado con aria-label');
+      return backButton;
+    }
+    
+    // Fallback: buscar por clase y contenido
+    const buttons = document.querySelectorAll('button');
+    for (const btn of buttons) {
+      const hasArrow = btn.querySelector('[aria-hidden="true"] i.google-material-icons:contains("arrow_back")');
+      if (hasArrow || btn.innerText?.toLowerCase().includes('back')) {
+        log('Botón Back encontrado por icono/texto');
+        return btn;
+      }
+    }
+    
+    // Fallback: buscar por posición (primer botón en esquina superior izquierda)
+    const topLeftButton = document.querySelector('.VYBDae-Bz112c-LgbsSe');
+    if (topLeftButton && topLeftButton.getAttribute('aria-label')?.toLowerCase().includes('back')) {
+      log('Botón Back encontrado por posición');
+      return topLeftButton;
+    }
+    
+    return null;
+  }
+
+  // Encontrar todos los contenedores de dispositivos en la VISTA DE LISTA
+  function findAllDeviceContainers() {
+    const containers = [];
+    const seen = new Set();
+    
+    // En la VISTA DE LISTA, los dispositivos están en estructuras como:
+    // <div class="NVStyd">
+    //   <div><img/></div>
+    //   <div>Nombre</div>
+    //   ...
+    // </div>
+    
+    // La estrategia PRINCIPAL es buscar div.NVStyd (es el estándar de Google)
+    const nvstydDivs = document.querySelectorAll('div.NVStyd');
+    if (nvstydDivs.length > 0) {
+      log('Encontrados', nvstydDivs.length, 'contenedores div.NVStyd');
+      nvstydDivs.forEach(el => {
+        if (!seen.has(el) && el.textContent?.length > 5) {
+          containers.push(el);
+          seen.add(el);
+        }
+      });
+      return containers; // Si encontramos NVStyd, usamos solo esos (son los correctos)
+    }
+    
+    // FALLBACK si no hay NVStyd: buscar otras estructuras de dispositivos
+    const addContainer = (el) => {
+      if (!el || seen.has(el)) return;
+      if (el.textContent && el.textContent.length > 5) {
+        containers.push(el);
+        seen.add(el);
+      }
+    };
+    
+    // Buscar elementos con role="listitem" o "option"
+    document.querySelectorAll('[role="listitem"], [role="option"]').forEach(el => addContainer(el));
+    
+    // Buscar divs dentro de listas
+    document.querySelectorAll('[role="list"] > div, [role="listbox"] > div').forEach(el => addContainer(el));
+    
+    // Buscar divs con clases que sugieran ser items de lista
+    document.querySelectorAll('div[class*="item"], div[class*="device"], div[class*="card"], div[class*="row"]').forEach(el => {
+      if (el.textContent?.length > 5) addContainer(el);
+    });
+    
+    log('Total de contenedores encontrados:', containers.length);
+    return containers;
+  }
+
+  // Encontrar el elemento clickeable en la VISTA DE LISTA (div.NVStyd)
+  function findClickableElementInList(container) {
+    // En la LISTA, el contenedor es div.NVStyd
+    // Estructura:
+    // <div class="NVStyd">
+    //   <div><img/></div>          ← Clickear aqui (imagen)
+    //   <div>Nombre</div>
+    //   <div>Status</div>
+    //   ...
+    // </div>
+    
+    log('Buscando elemento clickeable en lista...');
+    
+    // 1. Buscar la img directamente (es lo más seguro)
+    let clickable = container.querySelector('img');
+    if (clickable) {
+      log('✓ Encontrado img en lista');
+      return clickable;
+    }
+    
+    // 2. Buscar el primer div que tenga la img
+    clickable = container.querySelector('div:has(img)');
+    if (clickable) {
+      log('✓ Encontrado div:has(img) en lista');
+      return clickable;
+    }
+    
+    // 3. Clickear el container NVStyd directamente
+    if (container.classList.contains('NVStyd')) {
+      log('✓ Usando contenedor NVStyd directamente');
+      return container;
+    }
+    
+    // 4. Si nada, NO devolver nada
+    log('❌ No se encontró elemento clickeable en lista');
+    return null;
+  }
+
+  // Encontrar el elemento clickeable dentro de un contenedor (que sea el dispositivo, no las acciones)
+  function findClickableElement(container) {
+    // ESTRATEGIA SIMPLE Y DIRECTA:
+    // En la vista detallada, clickear SOLO el área de imagen+nombre
+    // NO los botones de acción (Reproducir, Marcar perdido, etc.)
+    
+    // Estructura esperada:
+    // <div class="Z3br3c">
+    //   <div class="rA4wRb"><img.../></div>     ← CLICKEAR AQUI
+    //   <div class="aYfhoe">                    ← O AQUI
+    //     <div>Nombre</div>
+    //   </div>
+    // </div>
+    // <div class="fas8Ad">                     ← NO AQUI
+    //   Botones de acción
+    // </div>
+    
+    log('Buscando elemento clickeable en detalles...');
+    
+    // 1. Buscar div.rA4wRb (la imagen) - es el más específico
+    let clickable = container.querySelector('div.rA4wRb');
+    if (clickable) {
+      log('✓ Encontrado div.rA4wRb en detalles');
+      return clickable;
+    }
+    
+    // 2. Buscar div.aYfhoe (área de info) - segundo más específico
+    clickable = container.querySelector('div.aYfhoe');
+    if (clickable) {
+      log('✓ Encontrado div.aYfhoe en detalles');
+      return clickable;
+    }
+    
+    // 3. Buscar div.Z3br3c (contenedor principal)
+    clickable = container.querySelector('div.Z3br3c');
+    if (clickable) {
+      log('✓ Encontrado div.Z3br3c en detalles');
+      return clickable;
+    }
+    
+    // 4. Buscar img (foto del dispositivo)
+    clickable = container.querySelector('img');
+    if (clickable) {
+      log('✓ Encontrado img en detalles');
+      return clickable;
+    }
+    
+    // Si nada funciona, NO devolver nada (mejor no hacer clic que hacer clic mal)
+    log('❌ No se encontró elemento clickeable seguro en detalles');
+    return null;
   }
 
   // Estrategia 1: Analizar texto de la pagina buscando patrones de dispositivos
@@ -166,6 +510,10 @@
         el.closest('[role="button"]');
 
       if (!looksLikeDevice) return;
+
+      // Skip if text matches multiple device patterns (likely concatenated names)
+      const patternMatches = devicePatterns.filter(p => p.test(text)).length;
+      if (patternMatches > 1) return;
 
       // Usar el texto como clave para evitar duplicados de nombres similares
       const key = normalize(text);
@@ -342,8 +690,11 @@
   
   // Extraer ubicacion del panel de detalles
   function extractLocationFromPanel(panel) {
+    // Si panel es document, buscar globalmente
+    const searchRoot = panel === document ? document : panel;
+    
     // 1) Intentar extraer coordenadas del iframe de Google Maps
-    const gmaps = document.querySelector('iframe[src*="maps"], .gm-style');
+    const gmaps = searchRoot.querySelector('iframe[src*="maps"], .gm-style');
     if (gmaps) {
       const src = gmaps.getAttribute('src') || '';
       const coordMatch = src.match(/center=(-?\d+\.?\d*),(-?\d+\.?\d*)/);
@@ -356,14 +707,14 @@
     }
 
     // 2) Buscar coordenadas en el texto del panel (ej. "40.1234, -3.1234")
-    const panelText = panel.textContent || '';
+    const panelText = searchRoot.textContent || '';
     const coords = extractCoordinatesFromText(panelText);
     if (coords) {
       return coords;
     }
 
     // 3) Buscar elementos con datos de ubicación
-    const addressEl = panel.querySelector('[data-address], .address, [data-ubicacion], .ubicacion');
+    const addressEl = searchRoot.querySelector('[data-address], .address, [data-ubicacion], .ubicacion');
     if (addressEl) {
       return { address: addressEl.textContent?.trim() };
     }
@@ -390,6 +741,99 @@
       };
     }
     return null;
+  }
+
+  // Extraer ubicación haciendo clic en cada dispositivo
+  async function extractLocationsByClicking(devices) {
+    log('Iniciando extracción de ubicaciones por clic');
+    
+    // Usar los mismos selectores que la extracción interactiva
+    const allElements = document.querySelectorAll('[role="listitem"], [role="option"], [data-deviceid], [data-id]');
+    
+    log('Elementos encontrados con selectores de lista:', allElements.length);
+    
+    // Filtrar elementos que contengan texto que parezca nombre de dispositivo
+    const deviceElements = [];
+    
+    allElements.forEach(el => {
+      const text = el.textContent?.trim() || '';
+      if (text.length < 2 || text.length > 100) return;
+      
+      const devicePatterns = [
+        /pixel/i, /samsung/i, /galaxy/i, /iphone/i, /xiaomi/i, /redmi/i, /oneplus/i, /huawei/i, /oppo/i, /motorola/i, /nokia/i, /lg/i, /sony/i, /asus/i, /realme/i, /vivo/i, /poco/i, /tablet/i, /watch/i, /honor/i, /nothing/i, /jbl/i, /wh-1000xm/i
+      ];
+      
+      const matchesPattern = devicePatterns.some(p => p.test(text));
+      if (matchesPattern) {
+        // Buscar un botón hijo para hacer clic (ej. "Find", "Locate")
+        const locateButton = el.querySelector('button, [role="button"], a');
+        if (locateButton) {
+          const buttonText = locateButton.textContent?.trim() || '';
+          if (buttonText.match(/find|locate|buscar|ubicación|localizar/i) || buttonText === '') {
+            deviceElements.push(locateButton);
+            log('Botón de localización encontrado para:', text.substring(0, 30));
+          }
+        } else {
+          // Si no hay botón específico, usar el elemento principal si es clickeable
+          deviceElements.push(el);
+          log('Elemento clickeable encontrado:', text.substring(0, 30));
+        }
+      }
+    });
+    
+    log('Elementos clickeables encontrados:', deviceElements.length);
+    
+    if (deviceElements.length === 0) {
+      log('No se encontraron elementos clickeables que parezcan dispositivos');
+      return;
+    }
+
+    log('Intentando extraer ubicaciones haciendo clic en', Math.min(deviceElements.length, devices.length), 'elementos');
+
+    for (let i = 0; i < deviceElements.length && i < devices.length; i++) {
+      const el = deviceElements[i];
+      const device = devices[i];
+
+      if (device.location) {
+        log('Dispositivo', device.name, 'ya tiene ubicación, saltando');
+        continue;
+      }
+
+      try {
+        const text = el.textContent?.substring(0, 50) || 'sin texto';
+        log('Haciendo clic en elemento', i, text);
+        
+        // Hacer clic en el elemento
+        el.click();
+        
+        // Esperar a que cargue la ubicación
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        // Buscar el panel de detalles
+        const detailPanel = document.querySelector('[role="complementary"], [role="region"], aside, .detail-panel, #device-details, .device-details');
+        
+        if (detailPanel) {
+          log('Panel de detalles encontrado, extrayendo ubicación');
+          const location = extractLocationFromPanel(detailPanel);
+          if (location) {
+            device.location = location;
+            log('Ubicación extraída para', device.name, location);
+          } else {
+            log('No se pudo extraer ubicación del panel');
+          }
+        } else {
+          log('No se encontró panel de detalles después del clic');
+          // Intentar extraer de todo el documento como fallback
+          const location = extractLocationFromPanel(document);
+          if (location) {
+            device.location = location;
+            log('Ubicación extraída del documento para', device.name, location);
+          }
+        }
+      } catch (e) {
+        log('Error al hacer clic en dispositivo', i, e);
+      }
+    }
   }
 
   // Extraer texto de un elemento
@@ -582,23 +1026,46 @@
   function processNetworkData(data) {
     if (!data) return;
     
+    log('Procesando datos de red...');
+    
     // Buscar estructura de dispositivos en la respuesta
     const devices = findDevicesInObject(data);
     if (devices.length > 0) {
+      log('Dispositivos encontrados en respuesta de red:', devices.length);
+      
+      let hasNewLocationData = false;
+      
       // Merge con datos existentes (preferir datos de red más completos)
       const existingNames = new Set(networkData.map(d => (d.name || '').toLowerCase()));
       devices.forEach(d => {
         if (d.name && !existingNames.has(d.name.toLowerCase())) {
           networkData.push(d);
+          log('Nuevo dispositivo de red agregado:', d.name, 'ubicación:', d.location ? 'sí' : 'no');
+          if (d.location) hasNewLocationData = true;
         } else if (d.name) {
-          // Actualizar el existente con datos nuevos
+          // Actualizar el existente con datos nuevos, especialmente ubicación
           const idx = networkData.findIndex(nd => nd.name?.toLowerCase() === d.name.toLowerCase());
           if (idx >= 0) {
+            const oldLocation = networkData[idx].location;
+            const newLocation = d.location;
+            
+            // Merge de datos
             networkData[idx] = { ...networkData[idx], ...d };
+            
+            // Detectar si la ubicación cambió
+            if (newLocation && JSON.stringify(oldLocation) !== JSON.stringify(newLocation)) {
+              hasNewLocationData = true;
+              log('Ubicación actualizada para:', d.name, 'lat:', newLocation.lat, 'lng:', newLocation.lng);
+            }
           }
         }
       });
-      notifyDashboard();
+      
+      // Notificar al dashboard si hay datos nuevos de ubicación
+      if (hasNewLocationData) {
+        log('Datos de ubicación nuevos detectados, notificando dashboard...');
+        notifyDashboard();
+      }
     }
   }
 
@@ -821,17 +1288,40 @@
   }
 
   // Notificar al dashboard
-  function notifyDashboard() {
-    const devices = extractDevices();
-    
-    // Guardar en storage
-    chrome.storage.local.set({ devices, lastUpdate: Date.now() });
-    
-    // Enviar al background script
-    chrome.runtime.sendMessage({
-      type: 'DEVICES_UPDATE',
-      devices: devices
-    });
+  async function notifyDashboard() {
+    try {
+      const devices = await extractDevices();
+      
+      // Merge con datos de red si existen
+      const mergedDevices = devices.map(device => {
+        const netData = networkData.find(nd => nd.name?.toLowerCase() === device.name.toLowerCase());
+        if (netData && netData.location && !device.location) {
+          return { ...device, location: netData.location };
+        }
+        return device;
+      });
+      
+      log('Notificando dashboard con', mergedDevices.length, 'dispositivos');
+      
+      // Guardar en storage
+      chrome.storage.local.set({ devices: mergedDevices, lastUpdate: Date.now() });
+      
+      // Enviar al background script con manejo de errores
+      try {
+        chrome.runtime.sendMessage({
+          type: 'DEVICES_UPDATE',
+          devices: mergedDevices
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            log('Error enviando mensaje al background:', chrome.runtime.lastError.message);
+          }
+        });
+      } catch (e) {
+        log('Error en chrome.runtime.sendMessage:', e.message);
+      }
+    } catch (e) {
+      log('Error en notifyDashboard:', e.message, e.stack);
+    }
   }
 
   // Escuchar mensajes del dashboard web
@@ -855,19 +1345,30 @@
 
     if (type === 'REQUEST_DEVICES') {
       // Pedir al background script los dispositivos guardados (o extraerlos en Find My Device)
-      chrome.runtime.sendMessage({ type: 'GET_DEVICES' }, (response) => {
-        window.postMessage(
-          {
-            type: 'DEVICES_RESPONSE',
-            source: EXTENSION_ID,
-            requestId,
-            devices: response?.devices || [],
-            lastUpdate: response?.lastUpdate,
-            error: response?.error,
-          },
-          '*'
-        );
-      });
+      try {
+        chrome.runtime.sendMessage({ type: 'GET_DEVICES' }, (response) => {
+          try {
+            if (chrome.runtime.lastError) {
+              log('Error getting devices:', chrome.runtime.lastError.message);
+            }
+            window.postMessage(
+              {
+                type: 'DEVICES_RESPONSE',
+                source: EXTENSION_ID,
+                requestId,
+                devices: response?.devices || [],
+                lastUpdate: response?.lastUpdate,
+                error: response?.error,
+              },
+              '*'
+            );
+          } catch (e) {
+            log('Error posting devices response:', e.message);
+          }
+        });
+      } catch (e) {
+        log('Error sending GET_DEVICES message:', e.message);
+      }
       return;
     }
 
@@ -883,32 +1384,51 @@
 
     if (type === 'OPEN_FIND_MY_DEVICE') {
       // Delegar al background para abrir la pestaña
-      chrome.runtime.sendMessage({
-        type: 'OPEN_FIND_MY_DEVICE',
-        background: event.data.background,
-      });
+      try {
+        chrome.runtime.sendMessage({
+          type: 'OPEN_FIND_MY_DEVICE',
+          background: event.data.background,
+        }, (response) => {
+          if (chrome.runtime.lastError) {
+            log('Error in OPEN_FIND_MY_DEVICE:', chrome.runtime.lastError.message);
+          }
+        });
+      } catch (e) {
+        log('Error sending OPEN_FIND_MY_DEVICE:', e.message);
+      }
       return;
     }
   });
 
   // Escuchar mensajes del background script
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'GET_DEVICES') {
-      const devices = extractDevices();
-      sendResponse({ devices });
+    try {
+      if (message.type === 'GET_DEVICES') {
+        extractDevices().then(devices => {
+          sendResponse({ devices });
+        }).catch(e => {
+          log('Error obteniendo dispositivos:', e.message);
+          sendResponse({ error: e.message });
+        });
+        return true; // Indica que sendResponse será llamado asincronamente
+      }
+      
+      if (message.type === 'START_MONITORING') {
+        startMonitoring(message.interval || 5000);
+        sendResponse({ status: 'started' });
+        return true;
+      }
+      
+      if (message.type === 'STOP_MONITORING') {
+        stopMonitoring();
+        sendResponse({ status: 'stopped' });
+        return true;
+      }
+    } catch (e) {
+      log('Error en chrome.runtime.onMessage listener:', e.message);
+      sendResponse({ error: e.message });
+      return true;
     }
-    
-    if (message.type === 'START_MONITORING') {
-      startMonitoring(message.interval || 5000);
-      sendResponse({ status: 'started' });
-    }
-    
-    if (message.type === 'STOP_MONITORING') {
-      stopMonitoring();
-      sendResponse({ status: 'stopped' });
-    }
-    
-    return true;
   });
 
   // Iniciar monitoreo continuo
@@ -916,22 +1436,55 @@
     if (isMonitoring) return;
     
     isMonitoring = true;
-    monitorInterval = setInterval(() => {
-      const devices = extractDevices();
-      
-      // Detectar cambios
-      const hasChanges = JSON.stringify(devices) !== JSON.stringify(lastDevices);
-      
-      if (hasChanges) {
-        lastDevices = devices;
-        notifyDashboard();
+    
+    // Variable para rastrear dispositivos que ya han sido clickeados
+    let clickedDevices = new Set();
+    
+    monitorInterval = setInterval(async () => {
+      try {
+        const devices = await extractDevices();
         
-        // Notificar cambios
-        chrome.runtime.sendMessage({
-          type: 'DEVICES_CHANGED',
-          devices: devices,
-          timestamp: Date.now()
-        });
+        // Detectar cambios
+        const hasChanges = JSON.stringify(devices) !== JSON.stringify(lastDevices);
+        
+        if (hasChanges) {
+          lastDevices = devices;
+          notifyDashboard();
+          
+          // Detectar dispositivos nuevos que no han sido clickeados
+          const newDevices = devices.filter(d => {
+            const key = (d.name || '').toLowerCase();
+            return !clickedDevices.has(key) && !d.location;
+          });
+          
+          if (newDevices.length > 0) {
+            log('Dispositivos nuevos sin ubicación detectados:', newDevices.length);
+            // Hacer clic en los nuevos dispositivos para extraer ubicaciones
+            simulateUserClicks(newDevices);
+            
+            // Marcar como clickeados
+            newDevices.forEach(d => {
+              clickedDevices.add((d.name || '').toLowerCase());
+            });
+          }
+          
+          // Notificar cambios
+          try {
+            chrome.runtime.sendMessage({
+              type: 'DEVICES_CHANGED',
+              devices: devices,
+              timestamp: Date.now()
+            }, (response) => {
+              if (chrome.runtime.lastError) {
+                log('Error en DEVICES_CHANGED:', chrome.runtime.lastError.message);
+              }
+            });
+          } catch (e) {
+            log('Error enviando DEVICES_CHANGED:', e.message);
+          }
+        }
+      } catch (e) {
+        log('Error en monitoring loop:', e.message);
       }
     }, interval);
   }
@@ -1052,16 +1605,36 @@
   
   // Exponer funcion globalmente para debug
   window.__deviceTrackerAnalyze = analyzeDOMStructure;
+  window.__deviceTrackerSimulateClicks = simulateUserClicks;
+  window.__deviceTrackerNetworkData = () => getNetworkData();
 
   // Enganchar el API de Google Maps lo antes posible
   hookGoogleMapsAPI();
   
   // Iniciar monitoreo automaticamente con delay mayor para esperar carga
   setTimeout(() => {
-    log('Iniciando analisis inicial...');
-    analyzeDOMStructure();
+    log('=== INICIANDO SISTEMA DE EXTRACCIÓN DE DISPOSITIVOS ===');
+    log('Tiempo de espera completado, iniciando análisis...');
+    
+    // Análisis de DOM
+    const analysis = analyzeDOMStructure();
+    log('Análisis de DOM completado:', analysis);
+    
+    // Iniciar extracción de dispositivos
+    extractDevices().then(devices => {
+      log('Dispositivos iniciales extraídos:', devices.length);
+      devices.forEach(d => {
+        log(`  - ${d.name} (${d.source}) | Batería: ${d.battery}% | Ubicación: ${d.location ? 'sí' : 'no'}`);
+      });
+    });
+    
+    // Iniciar monitoreo continuo
     startMonitoring(5000);
+    log('Monitoreo continuo iniciado');
+    
+    // Notificar al dashboard
     notifyDashboard();
+    log('Notificación inicial enviada al dashboard');
   }, 4000);
 
 })();
