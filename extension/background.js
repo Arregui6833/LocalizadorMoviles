@@ -113,9 +113,18 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
 // Detectar si una pestaña es de Find My Device
 function isFindMyDeviceTab(url) {
   if (!url) return false;
-  return url.includes('/android/find') ||
-         url.includes('findmydevice.google.com') ||
-         url.includes('android.google.com/find');
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const path = parsed.pathname;
+    return (
+      (host === 'www.google.com' && path.includes('/android/find')) ||
+      host === 'findmydevice.google.com' ||
+      (host === 'android.google.com' && path.startsWith('/find'))
+    );
+  } catch {
+    return false;
+  }
 }
 
 // Obtener dispositivos del content script

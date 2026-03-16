@@ -510,16 +510,21 @@
   // Comprobar si una URL debe ser interceptada para buscar datos de dispositivos
   function shouldInterceptUrl(url) {
     if (!url) return false;
-    const u = url.toString();
-    return (
-      u.includes('android/find') ||
-      u.includes('findmydevice.google.com') ||
-      u.includes('devicemanagement') ||
-      u.includes('googleapis.com/devicemanagement') ||
-      u.includes('googleapis.com/android') ||
-      u.includes('_/FindDevice') ||
-      u.includes('android.google.com/find')
-    );
+    try {
+      const parsed = new URL(url.toString(), window.location.href);
+      const host = parsed.hostname;
+      const path = parsed.pathname;
+      // Solo interceptar peticiones a dominios de Google relacionados con Find My Device
+      return (
+        (host === 'www.google.com' && (path.includes('/android/find') || path.includes('/_/FindDevice'))) ||
+        host === 'findmydevice.google.com' ||
+        (host === 'android.google.com' && path.startsWith('/find')) ||
+        (host === 'www.googleapis.com' && (path.includes('/devicemanagement') || path.includes('/android'))) ||
+        (host === 'androiddevicemanager.googleapis.com')
+      );
+    } catch {
+      return false;
+    }
   }
 
   // Interceptar XHR
@@ -679,7 +684,7 @@
             obj.imei ||
             obj.serialNumber ||
             obj.esn ||
-            `net-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            `net-${Date.now()}-${(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.random().toString(16).slice(2))}`,
           name,
           battery,
           lastSeen:
@@ -747,6 +752,9 @@
   // Marcadores capturados del API de Google Maps
   const mapMarkers = [];
 
+  // Número máximo de intentos para enganchar el API de Google Maps (1 intento/seg = 30 seg)
+  const MAX_GOOGLE_MAPS_HOOK_ATTEMPTS = 30;
+
   // Enganchar el API de Google Maps para capturar posiciones de marcadores
   function hookGoogleMapsAPI() {
     let attempts = 0;
@@ -754,7 +762,7 @@
       attempts++;
       const gm = window.google && window.google.maps;
       if (!gm) {
-        if (attempts < 30) setTimeout(tryHook, 1000);
+        if (attempts < MAX_GOOGLE_MAPS_HOOK_ATTEMPTS) setTimeout(tryHook, 1000);
         return;
       }
 
