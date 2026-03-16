@@ -49,6 +49,13 @@ export function Dashboard() {
     }
   }, [useDemoMode]);
 
+  // Cambiar automáticamente al modo real cuando la extensión se conecta y devuelve dispositivos
+  useEffect(() => {
+    if (isConnected && realDevices.length > 0 && useDemoMode) {
+      setUseDemoMode(false);
+    }
+  }, [isConnected, realDevices.length, useDemoMode]);
+
   const handleRefresh = async () => {
     if (!useDemoMode) {
       await fetchDevices();

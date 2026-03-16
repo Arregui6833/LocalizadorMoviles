@@ -78,7 +78,12 @@ function DeviceCard({ device, isSelected, onClick }: DeviceCardProps) {
   const formatLastSeen = (lastSeen: string | null) => {
     if (!lastSeen) return "Desconocido";
 
+    // Si ya es un texto relativo (ej. "hace 5 minutos"), devolverlo tal cual
+    if (/hace|last seen|ultima vez/i.test(lastSeen)) return lastSeen;
+
     const date = new Date(lastSeen);
+    if (isNaN(date.getTime())) return lastSeen; // devolver texto si no es fecha válida
+
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
@@ -94,6 +99,8 @@ function DeviceCard({ device, isSelected, onClick }: DeviceCardProps) {
       month: "short",
     });
   };
+
+  const displayLastSeen = device.activity || formatLastSeen(device.lastSeen);
 
   return (
     <button
@@ -168,7 +175,7 @@ function DeviceCard({ device, isSelected, onClick }: DeviceCardProps) {
 
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
               <Clock className="w-3 h-3" />
-              <span>{formatLastSeen(device.lastSeen)}</span>
+              <span>{displayLastSeen}</span>
             </div>
           </div>
         </div>

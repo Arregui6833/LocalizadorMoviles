@@ -29,14 +29,19 @@
     // Estrategia 3: Datos de red interceptados
     const extractedFromNetwork = getNetworkData();
 
+    // Estrategia 4: Extraer de variables globales de la pagina
+    const extractedFromGlobals = extractFromWindowGlobals();
+
     log('Desde texto:', extractedFromText.length);
     log('Desde elementos:', extractedFromInteractive.length);
     log('Desde red:', extractedFromNetwork.length);
+    log('Desde globales:', extractedFromGlobals.length);
 
     // Combinar resultados
     devices.push(...extractedFromText);
     devices.push(...extractedFromInteractive);
     devices.push(...extractedFromNetwork);
+    devices.push(...extractedFromGlobals);
 
     // Eliminar duplicados por nombre/id
     const normalizeName = (name) => {
@@ -86,6 +91,21 @@
     });
 
     const uniqueDevices = Array.from(map.values());
+
+    // Si hay marcadores de Google Maps y algún dispositivo no tiene ubicación, intentar asignar
+    if (mapMarkers.length > 0) {
+      let markerIdx = 0;
+      uniqueDevices.forEach(device => {
+        if (!device.location && markerIdx < mapMarkers.length) {
+          device.location = {
+            lat: mapMarkers[markerIdx].lat,
+            lng: mapMarkers[markerIdx].lng,
+            address: mapMarkers[markerIdx].title || null,
+          };
+          markerIdx++;
+        }
+      });
+    }
 
     log('Dispositivos unicos encontrados:', uniqueDevices.length, uniqueDevices);
     return uniqueDevices;
@@ -152,12 +172,9 @@
       if (foundNames.has(key)) return;
       foundNames.add(key);
 
-      // Buscar en el contenedor principal del dispositivo (para evitar fragmentos sueltos)
-      const container =
-        el.closest('[role="listitem"]') ||
-        el.closest('[role="option"]') ||
-        el.closest('li') ||
-        el.closest('div');
+      // Buscar en el contenedor principal del dispositivo.
+      // Subir en el DOM hasta encontrar el contenedor más pequeño que incluya el porcentaje de batería.
+      const container = findBestContainer(el);
       const containerText = container?.textContent || text;
 
       const batteryMatch = containerText.match(batteryPattern);
@@ -182,6 +199,40 @@
     });
 
     return devices;
+  }
+
+  // Encontrar el mejor contenedor para un elemento de dispositivo.
+  // Sube en el DOM para encontrar el ancestro más pequeño que contenga el nivel de batería.
+  function findBestContainer(el) {
+    // Primero intentar roles/elementos semánticos
+    const named =
+      el.closest('[role="listitem"]') ||
+      el.closest('[role="option"]') ||
+      el.closest('li');
+    if (named) return named;
+
+    // Subir en el DOM buscando el contenedor más pequeño que tenga un porcentaje
+    let current = el.parentElement;
+    let levels = 0;
+    while (current && levels < 8) {
+      const t = current.textContent || '';
+      // Parar si el contenedor es demasiado grande (probablemente engloba múltiples dispositivos)
+      if (t.length > 800) break;
+      if (/\d{1,3}\s*%/.test(t)) return current;
+      current = current.parentElement;
+      levels++;
+    }
+
+    // Alternativa: subir hasta encontrar un contenedor de tamaño razonable
+    current = el.parentElement;
+    levels = 0;
+    while (current && levels < 5) {
+      if ((current.textContent || '').length < 500) return current;
+      current = current.parentElement;
+      levels++;
+    }
+
+    return el;
   }
 
   // Estrategia 2: Buscar elementos interactivos que representen dispositivos
@@ -456,6 +507,21 @@
     return networkData;
   }
 
+  // Comprobar si una URL debe ser interceptada para buscar datos de dispositivos
+  function shouldInterceptUrl(url) {
+    if (!url) return false;
+    const u = url.toString();
+    return (
+      u.includes('android/find') ||
+      u.includes('findmydevice.google.com') ||
+      u.includes('devicemanagement') ||
+      u.includes('googleapis.com/devicemanagement') ||
+      u.includes('googleapis.com/android') ||
+      u.includes('_/FindDevice') ||
+      u.includes('android.google.com/find')
+    );
+  }
+
   // Interceptar XHR
   const originalXHR = window.XMLHttpRequest;
   window.XMLHttpRequest = function() {
@@ -468,13 +534,17 @@
     };
     
     xhr.addEventListener('load', function() {
-      if (xhr._url && xhr._url.includes('android/find')) {
-        try {
-          const data = JSON.parse(xhr.responseText);
-          processNetworkData(data);
-        } catch (e) {
-          // Not JSON
+      if (!shouldInterceptUrl(xhr._url)) return;
+      try {
+        // Eliminar prefijo anti-XSSI de Google (")]}'\n")
+        let text = xhr.responseText;
+        if (text && text.startsWith(')]}')) {
+          text = text.substring(text.indexOf('\n') + 1);
         }
+        const data = JSON.parse(text);
+        processNetworkData(data);
+      } catch (e) {
+        // No es JSON válido
       }
     });
     
@@ -485,11 +555,20 @@
   const originalFetch = window.fetch;
   window.fetch = function(url, options) {
     return originalFetch.apply(this, arguments).then(response => {
-      if (url && url.toString().includes('android/find')) {
-        response.clone().json().then(data => {
+      if (!shouldInterceptUrl(url)) return response;
+      response.clone().text().then(text => {
+        try {
+          // Eliminar prefijo anti-XSSI de Google
+          let t = text;
+          if (t && t.startsWith(')]}')) {
+            t = t.substring(t.indexOf('\n') + 1);
+          }
+          const data = JSON.parse(t);
           processNetworkData(data);
-        }).catch(() => {});
-      }
+        } catch (e) {
+          // No es JSON válido
+        }
+      }).catch(() => {});
       return response;
     });
   };
@@ -501,14 +580,53 @@
     // Buscar estructura de dispositivos en la respuesta
     const devices = findDevicesInObject(data);
     if (devices.length > 0) {
-      networkData = devices;
+      // Merge con datos existentes (preferir datos de red más completos)
+      const existingNames = new Set(networkData.map(d => (d.name || '').toLowerCase()));
+      devices.forEach(d => {
+        if (d.name && !existingNames.has(d.name.toLowerCase())) {
+          networkData.push(d);
+        } else if (d.name) {
+          // Actualizar el existente con datos nuevos
+          const idx = networkData.findIndex(nd => nd.name?.toLowerCase() === d.name.toLowerCase());
+          if (idx >= 0) {
+            networkData[idx] = { ...networkData[idx], ...d };
+          }
+        }
+      });
       notifyDashboard();
     }
   }
 
+  // Extraer ubicación desde un objeto de coordenadas de cualquier formato conocido
+  function extractLocationFromObj(obj) {
+    if (!obj) return null;
+    // Formato { lat, lng } o { lat, lon } o { latitude, longitude }
+    const lat = obj.lat ?? obj.latitude ?? obj.Lat ?? obj.Latitude ?? null;
+    const lng = obj.lng ?? obj.lon ?? obj.longitude ?? obj.Lng ?? obj.Longitude ?? null;
+    if (lat != null && lng != null) {
+      return {
+        lat: typeof lat === 'number' ? lat : parseFloat(lat),
+        lng: typeof lng === 'number' ? lng : parseFloat(lng),
+        address: obj.address || obj.formattedAddress || obj.displayAddress || null,
+      };
+    }
+    return null;
+  }
+
+  // Extraer nivel de batería desde un objeto de cualquier formato conocido
+  function extractBatteryFromObj(obj) {
+    if (obj == null) return null;
+    if (typeof obj === 'number') return obj > 1 ? obj : Math.round(obj * 100);
+    if (typeof obj === 'object') {
+      const level = obj.level ?? obj.batteryLevel ?? obj.charge ?? obj.percentage ?? null;
+      if (level != null) return typeof level === 'number' && level <= 1 ? Math.round(level * 100) : level;
+    }
+    return null;
+  }
+
   // Buscar dispositivos en objeto recursivamente
   function findDevicesInObject(obj, depth = 0) {
-    if (depth > 10) return [];
+    if (depth > 12) return [];
     const devices = [];
     
     if (Array.isArray(obj)) {
@@ -516,28 +634,182 @@
         devices.push(...findDevicesInObject(item, depth + 1));
       });
     } else if (obj && typeof obj === 'object') {
-      // Verificar si es un dispositivo
-      if (obj.name || obj.deviceName || obj.alias) {
+      // Detectar objeto que parece un dispositivo (múltiples nombres de campo posibles)
+      const name =
+        obj.name ||
+        obj.deviceName ||
+        obj.alias ||
+        obj.friendlyName ||
+        obj.displayName ||
+        obj.deviceNickname ||
+        obj.nickname ||
+        obj.label ||
+        null;
+
+      if (name && typeof name === 'string' && name.length > 1 && name.length < 120) {
+        // Construir objeto de ubicación
+        const locObj =
+          obj.location ||
+          obj.lastKnownLocation ||
+          obj.lastLocation ||
+          obj.coordinates ||
+          obj.geoLocation ||
+          null;
+        const location = extractLocationFromObj(locObj) ||
+          (obj.lat != null && obj.lng != null
+            ? { lat: parseFloat(obj.lat), lng: parseFloat(obj.lng), address: obj.address || null }
+            : null) ||
+          (obj.latitude != null && obj.longitude != null
+            ? { lat: parseFloat(obj.latitude), lng: parseFloat(obj.longitude), address: null }
+            : null);
+
+        const batteryRaw =
+          obj.battery ??
+          obj.batteryLevel ??
+          obj.batteryCharge ??
+          obj.batteryPercentage ??
+          obj.charge ??
+          null;
+        const battery = batteryRaw != null ? extractBatteryFromObj(batteryRaw) : null;
+
         const device = {
-          id: obj.id || obj.deviceId || obj.imei || `net-${Date.now()}`,
-          name: obj.name || obj.deviceName || obj.alias,
-          battery: obj.battery || obj.batteryLevel,
-          lastSeen: obj.lastSeen || obj.lastUpdate || obj.timestamp,
-          location: obj.location || (obj.lat && obj.lng ? { lat: obj.lat, lng: obj.lng } : null),
-          isOnline: obj.online !== false,
-          model: obj.model || obj.deviceModel,
-          extractedAt: new Date().toISOString()
+          id:
+            obj.id ||
+            obj.deviceId ||
+            obj.imei ||
+            obj.serialNumber ||
+            obj.esn ||
+            `net-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          name,
+          battery,
+          lastSeen:
+            obj.lastSeen ||
+            obj.lastUpdate ||
+            obj.lastOnline ||
+            obj.timestamp ||
+            obj.updatedAt ||
+            null,
+          activity: obj.activity || obj.status || null,
+          location,
+          isOnline: obj.online !== false && obj.isOnline !== false && obj.connected !== false,
+          model: obj.model || obj.deviceModel || obj.hardware || null,
+          source: 'network',
+          extractedAt: new Date().toISOString(),
         };
         devices.push(device);
       }
       
-      // Buscar en propiedades
-      Object.values(obj).forEach(value => {
-        devices.push(...findDevicesInObject(value, depth + 1));
+      // Buscar en propiedades (evitar propiedades que son objetos de ubicación para no duplicar)
+      const skipKeys = new Set(['location', 'lastKnownLocation', 'lastLocation', 'coordinates', 'geoLocation']);
+      Object.entries(obj).forEach(([key, value]) => {
+        if (!skipKeys.has(key) && value && typeof value === 'object') {
+          devices.push(...findDevicesInObject(value, depth + 1));
+        }
       });
     }
     
     return devices;
+  }
+
+  // Extraer datos de dispositivos desde variables globales de la página
+  function extractFromWindowGlobals() {
+    const devices = [];
+    const candidates = [
+      '__NUXT__',
+      '__NEXT_DATA__',
+      '__INITIAL_STATE__',
+      '__APP_STATE__',
+      '__data__',
+      '__deviceData__',
+      'deviceData',
+      '__store__',
+      'initialData',
+    ];
+
+    for (const key of candidates) {
+      try {
+        const val = window[key];
+        if (val) {
+          const found = findDevicesInObject(val);
+          if (found.length > 0) {
+            log('Dispositivos encontrados en window.' + key + ':', found.length);
+            devices.push(...found);
+          }
+        }
+      } catch (e) {
+        // Ignorar errores de acceso
+      }
+    }
+
+    return devices;
+  }
+
+  // Marcadores capturados del API de Google Maps
+  const mapMarkers = [];
+
+  // Enganchar el API de Google Maps para capturar posiciones de marcadores
+  function hookGoogleMapsAPI() {
+    let attempts = 0;
+    function tryHook() {
+      attempts++;
+      const gm = window.google && window.google.maps;
+      if (!gm) {
+        if (attempts < 30) setTimeout(tryHook, 1000);
+        return;
+      }
+
+      // Enganchar google.maps.Marker (API clásica)
+      if (gm.Marker && !gm.Marker.__dtHooked) {
+        const OrigMarker = gm.Marker;
+        function HookedMarker(opts) {
+          const inst = new OrigMarker(opts);
+          if (opts && opts.position) {
+            try {
+              const pos = opts.position;
+              const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat;
+              const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng;
+              if (lat != null && lng != null) {
+                mapMarkers.push({ lat, lng, title: opts.title || opts.label || null });
+                log('Google Maps marker capturado:', lat, lng, opts.title);
+              }
+            } catch (e) { /* ignore */ }
+          }
+          return inst;
+        }
+        HookedMarker.prototype = OrigMarker.prototype;
+        Object.setPrototypeOf(HookedMarker, OrigMarker);
+        HookedMarker.__dtHooked = true;
+        try { gm.Marker = HookedMarker; } catch (e) { /* ignore */ }
+      }
+
+      // Enganchar google.maps.marker.AdvancedMarkerElement (API nueva)
+      const markerNS = gm.marker;
+      if (markerNS && markerNS.AdvancedMarkerElement && !markerNS.AdvancedMarkerElement.__dtHooked) {
+        const OrigAME = markerNS.AdvancedMarkerElement;
+        class HookedAME extends OrigAME {
+          constructor(opts) {
+            super(opts);
+            if (opts && opts.position) {
+              try {
+                const pos = opts.position;
+                const lat = typeof pos.lat === 'function' ? pos.lat() : pos.lat;
+                const lng = typeof pos.lng === 'function' ? pos.lng() : pos.lng;
+                if (lat != null && lng != null) {
+                  mapMarkers.push({ lat, lng, title: opts.title || null });
+                  log('AdvancedMarker capturado:', lat, lng, opts.title);
+                }
+              } catch (e) { /* ignore */ }
+            }
+          }
+        }
+        HookedAME.__dtHooked = true;
+        try { markerNS.AdvancedMarkerElement = HookedAME; } catch (e) { /* ignore */ }
+      }
+
+      log('Google Maps API enganchada');
+    }
+
+    tryHook();
   }
 
   // Notificar al dashboard
@@ -772,6 +1044,9 @@
   
   // Exponer funcion globalmente para debug
   window.__deviceTrackerAnalyze = analyzeDOMStructure;
+
+  // Enganchar el API de Google Maps lo antes posible
+  hookGoogleMapsAPI();
   
   // Iniciar monitoreo automaticamente con delay mayor para esperar carga
   setTimeout(() => {

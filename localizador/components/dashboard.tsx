@@ -49,6 +49,13 @@ export function Dashboard() {
     }
   }, [useDemoMode]);
 
+  // Cambiar automáticamente al modo real cuando la extensión se conecta y devuelve dispositivos
+  useEffect(() => {
+    if (isConnected && realDevices.length > 0 && useDemoMode) {
+      setUseDemoMode(false);
+    }
+  }, [isConnected, realDevices.length, useDemoMode]);
+
   const handleRefresh = async () => {
     if (!useDemoMode) {
       await fetchDevices();
@@ -272,7 +279,17 @@ export function Dashboard() {
                   <div>
                     <p className="text-muted-foreground">Ubicacion</p>
                     <p className="mt-1 truncate">
-                      {selectedDeviceData.location?.address || "Sin ubicacion"}
+                      {selectedDeviceData.location?.address
+                        ? selectedDeviceData.location.address
+                        : selectedDeviceData.location?.lat && selectedDeviceData.location?.lng
+                        ? `${selectedDeviceData.location.lat.toFixed(4)}, ${selectedDeviceData.location.lng.toFixed(4)}`
+                        : "Sin ubicacion"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground">Actividad</p>
+                    <p className="mt-1 truncate">
+                      {selectedDeviceData.activity || selectedDeviceData.lastSeen || "Desconocida"}
                     </p>
                   </div>
                   <div>

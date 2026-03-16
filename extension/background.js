@@ -110,14 +110,19 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return true;
 });
 
+// Detectar si una pestaña es de Find My Device
+function isFindMyDeviceTab(url) {
+  if (!url) return false;
+  return url.includes('/android/find') ||
+         url.includes('findmydevice.google.com') ||
+         url.includes('android.google.com/find');
+}
+
 // Obtener dispositivos del content script
 async function getDevicesFromContentScript() {
-  // Algunas APIs (y patrones de URL) pueden ser sensibles. Para mayor fiabilidad,
-  // consultamos todas las pestañas y buscamos la URL que contenga "/android/find".
+  // Consultar todas las pestañas y buscar Find My Device (URL antigua y nueva).
   const allTabs = await chrome.tabs.query({});
-  const findTab = allTabs.find((tab) => {
-    return tab.url && tab.url.includes('/android/find');
-  });
+  const findTab = allTabs.find((tab) => isFindMyDeviceTab(tab.url));
 
   if (!findTab || !findTab.id) {
     throw new Error('Find My Device not open');
@@ -139,7 +144,7 @@ async function getDevicesFromContentScript() {
 // Iniciar monitoreo en Find My Device
 async function startMonitoringInFindMyDevice(interval = 5000) {
   const allTabs = await chrome.tabs.query({});
-  const findTab = allTabs.find((tab) => tab.url && tab.url.includes('/android/find'));
+  const findTab = allTabs.find((tab) => isFindMyDeviceTab(tab.url));
 
   if (!findTab || !findTab.id) {
     // Abrir Find My Device si no está abierto
@@ -159,7 +164,7 @@ async function startMonitoringInFindMyDevice(interval = 5000) {
 // Detener monitoreo
 async function stopMonitoringInFindMyDevice() {
   const allTabs = await chrome.tabs.query({});
-  const findTabs = allTabs.filter((tab) => tab.url && tab.url.includes('/android/find'));
+  const findTabs = allTabs.filter((tab) => isFindMyDeviceTab(tab.url));
 
   findTabs.forEach((tab) => {
     if (tab.id) {

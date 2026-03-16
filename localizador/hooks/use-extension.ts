@@ -13,6 +13,7 @@ export interface Device {
   name: string;
   battery: number | null;
   lastSeen: string | null;
+  activity?: string | null;
   location: DeviceLocation | null;
   isOnline: boolean;
   model?: string;
