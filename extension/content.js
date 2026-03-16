@@ -141,14 +141,48 @@
       });
     }
 
-    // Intentar hacer clic en dispositivos para extraer ubicaciones
-    // Esto se hace de forma segura y con manejo de errores
-    if (filteredDevices.length > 0) {
-      simulateUserClicks(filteredDevices);
+    // Actualizar la caché estable: preservar ubicaciones conocidas, mantener IDs estables.
+    // Solo se aceptan dispositivos con nombre válido para evitar que falsos positivos entren.
+    filteredDevices.forEach(device => {
+      if (!device.name || device.name.length < 2) return;
+      const cacheKey = normalizeName(device.name);
+      if (!cacheKey) return;
+      const cached = stableDeviceCache.get(cacheKey);
+      if (!cached) {
+        stableDeviceCache.set(cacheKey, { ...device });
+      } else {
+        stableDeviceCache.set(cacheKey, {
+          ...cached,
+          ...device,
+          id: cached.id, // mantener el ID estable para que el dashboard no lo pierda
+          location: device.location || cached.location, // nunca borrar una ubicación ya conocida
+        });
+      }
+    });
+
+    // Si tenemos datos de red con ubicación, actualizar la caché también
+    networkData.forEach(nd => {
+      if (!nd.name || !nd.location) return;
+      const cacheKey = normalizeName(nd.name);
+      if (!cacheKey) return;
+      const cached = stableDeviceCache.get(cacheKey);
+      if (cached && !cached.location) {
+        stableDeviceCache.set(cacheKey, { ...cached, location: nd.location });
+      }
+    });
+
+    // Devolver la caché completa para que el dashboard vea TODOS los dispositivos conocidos
+    // incluso cuando la SPA de Google FMD está en transición entre vistas
+    const stableResult = Array.from(stableDeviceCache.values());
+
+    // Intentar hacer clic en dispositivos que no tienen ubicación para extraerla
+    const devicesWithoutLocation = stableResult.filter(d => !d.location);
+    if (devicesWithoutLocation.length > 0) {
+      simulateUserClicks(devicesWithoutLocation);
     }
 
-    log('Dispositivos finales:', filteredDevices.length, filteredDevices);
-    return filteredDevices;
+    log('Dispositivos finales (caché estable):', stableResult.length, stableResult);
+    return stableResult;
   }
 
   // Helper: delay en ms
@@ -536,10 +570,21 @@
     return text || null;
   }
 
-  // Regex combinada de etiquetas de botones de acción de Google Find My Device.
-  // Estos botones siempre generarían falsos positivos como nombres de dispositivos.
+  // Eliminar sufijos de metadata que a veces se concatenan al nombre del dispositivo
+  // sin espacio (p.ej. "Galaxy S25Visto por última vez: hace 2 minutos" → "Galaxy S25").
+  // Esto ocurre porque el DOM de Google FMD coloca el nombre y el estado en elementos hermanos
+  // y el textContent los une sin separador.
+  function trimDeviceName(text) {
+    if (!text) return '';
+    return text
+      .replace(/(?:Visto\s+por|visto\s+por|hace\s+\d+|en\s+l[íi]nea|offline|online|desconectado|conectado|activo\s+ahora|en\s+movimiento|last\s+seen|last\s+active|\d{1,3}\s*%|MO\b|Mo\b|restablecer|borrar|marcar\s+como|reproducir|silenciar|localizar|bloquear|protegido|protected|lost\s+mode|modo\s+perdido).*$/i, '')
+      .trim();
+  }
+
+  // Regex combinada de etiquetas de botones de acción y opciones de menú de Google Find My Device.
+  // Estos elementos siempre generarían falsos positivos como nombres de dispositivos.
   const ACTION_BUTTON_RE =
-    /^(?:reproducir\s+sonido|silenciar|localizar|marcar\s+como\s+perdido|borrar\s+dispositivo|bloquear|play\s+sound|locate|lock|erase|find|secure\s+device|ring)$/i;
+    /^(?:reproducir\s+sonido|silenciar|localizar|marcar\s+como\s+perdido|borrar\s+dispositivo|bloquear|play\s+sound|locate|lock|erase|find|secure\s+device|ring|restablecer\s+el\s+estado\s+de\s+f[aá]brica(?:\s+del\s+dispositivo)?|factory\s+reset|reset\s+to\s+factory|enable\s+lost\s+mode|mark\s+as\s+lost|erase\s+device|modo\s+perdido|lost\s+mode|protected\s+by\s+google|protegido\s+por\s+google|activar\s+modo\s+perdido|marcar\s+como\s+perdido|m[aá]s\s+opciones|more\s+options|more\s+actions|opciones\s+de\s+dispositivo)$/i;
 
   // Estrategia 1: Analizar texto de la pagina buscando patrones de dispositivos
   function extractFromPageText() {
@@ -590,7 +635,15 @@
       const rawText = el.textContent?.trim();
       if (!rawText || rawText.length > 200 || rawText.length < 2) return;
 
-      // Omitir elementos que son botones de acción de Find My Device (no son dispositivos)
+      // Omitir elementos dentro de menús (son opciones de menú, no dispositivos)
+      if (
+        el.getAttribute('role') === 'menuitem' ||
+        el.getAttribute('role') === 'menu' ||
+        el.closest('[role="menu"]') !== null ||
+        el.closest('[role="menubar"]') !== null
+      ) return;
+
+      // Omitir elementos que son botones de acción conocidos de Find My Device
       const isActionButton =
         el.tagName === 'BUTTON' ||
         el.getAttribute('role') === 'button' ||
@@ -613,11 +666,15 @@
       const patternMatches = devicePatterns.filter(p => p.test(rawText)).length;
       if (patternMatches > 1) return;
 
-      // Limpiar el texto eliminando nombres de iconos Material Icon (snake_case)
-      const name = cleanElementText(el);
+      // Limpiar el texto eliminando nombres de iconos Material Icon (snake_case) y
+      // después recortar los sufijos de metadata que se concatenan sin espacio
+      // (p.ej. "Galaxy S25Visto por última vez: hace 2 minutos" → "Galaxy S25")
+      const cleaned = cleanElementText(el);
+      if (!cleaned) return;
+      const name = trimDeviceName(cleaned);
       if (!name || name.length < 2 || name.length > 120) return;
 
-      // Omitir si después de limpiar sigue siendo un texto de acción
+      // Omitir si después de limpiar es un texto de acción o menú
       if (ACTION_BUTTON_RE.test(name)) return;
 
       // Usar el nombre limpio como clave para evitar duplicados
@@ -797,7 +854,17 @@
   function extractLocationFromPanel(panel) {
     // Si panel es document, buscar globalmente
     const searchRoot = panel === document ? document : panel;
-    
+
+    // 0) Verificar la URL actual del navegador (cambia cuando se selecciona un dispositivo)
+    try {
+      const urlFull = window.location.href + ' ' + window.location.search + ' ' + window.location.hash;
+      const urlCoords = extractCoordinatesFromText(urlFull);
+      if (urlCoords && Math.abs(urlCoords.lat) <= 90 && Math.abs(urlCoords.lng) <= 180) {
+        log('Coordenadas extraídas de la URL:', urlCoords);
+        return urlCoords;
+      }
+    } catch (e) { /* ignorar */ }
+
     // 1) Intentar extraer coordenadas del iframe de Google Maps
     const gmaps = searchRoot.querySelector('iframe[src*="maps"], .gm-style');
     if (gmaps) {
@@ -814,24 +881,34 @@
     // 2) Buscar coordenadas en el texto del panel (ej. "40.1234, -3.1234")
     const panelText = searchRoot.textContent || '';
     const coords = extractCoordinatesFromText(panelText);
-    if (coords) {
+    if (coords && Math.abs(coords.lat) <= 90 && Math.abs(coords.lng) <= 180) {
       return coords;
     }
 
-    // 3) Buscar elementos con datos de ubicación
-    const addressEl = searchRoot.querySelector('[data-address], .address, [data-ubicacion], .ubicacion');
+    // 3) Buscar elementos con datos de ubicación (atributos data-*, clases específicas)
+    const addressEl = searchRoot.querySelector(
+      '[data-address], .address, [data-ubicacion], .ubicacion, ' +
+      '[jsname="WXaFdb"], [jsname="Bz112c"], .gws-localteam__location, ' +
+      '[data-lat][data-lng]'
+    );
     if (addressEl) {
-      return { address: addressEl.textContent?.trim() };
+      const lat = addressEl.getAttribute('data-lat');
+      const lng = addressEl.getAttribute('data-lng');
+      if (lat && lng) {
+        return { lat: parseFloat(lat), lng: parseFloat(lng), address: addressEl.textContent?.trim() || null };
+      }
+      return { address: addressEl.textContent?.trim() || null, lat: null, lng: null };
     }
 
-    // 4) Buscar texto que parezca dirección (ej. "Ubicación: ...")
-    const addressMatch = panelText.match(/(?:ubicaci[oó]n|direcci[oó]n|location|address)[:\s]+(.+)/i);
+    // 4) Buscar texto que parezca dirección: "Ubicación: ...", "Última ubicación conocida: ...", etc.
+    const addressMatch = panelText.match(
+      /(?:(?:[uú]ltima\s+)?(?:ubicaci[oó]n|direcci[oó]n|location|address)(?:\s+conocida)?)[:\s]+(.+)/i
+    );
     if (addressMatch) {
       const address = addressMatch[1].trim();
-      // Si contiene coordenadas, extraerlas
       const coordsFromText = extractCoordinatesFromText(address);
       if (coordsFromText) return coordsFromText;
-      return { address };
+      if (address.length > 3 && address.length < 200) return { address, lat: null, lng: null };
     }
 
     return null;
@@ -1051,6 +1128,11 @@
 
   // Interceptar datos de red (XHR/Fetch)
   let networkData = [];
+
+  // Cache estable de dispositivos — preserva dispositivos y ubicaciones entre
+  // actualizaciones del DOM (la SPA de Google FMD re-renderiza constantemente).
+  // Solo los dispositivos con nombre válido (>1 char) entran en la caché.
+  const stableDeviceCache = new Map(); // normalizedName → device
 
   function getNetworkData() {
     return networkData;

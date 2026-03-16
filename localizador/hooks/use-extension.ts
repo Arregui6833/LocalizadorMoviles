@@ -35,6 +35,35 @@ const DEFAULT_EXTENSION_ID = "YOUR_EXTENSION_ID_HERE";
 // Identificador que el content script incluye en los mensajes postMessage
 const EXTENSION_WINDOW_SOURCE = "device-tracker-monitor";
 
+/**
+ * Combina la lista existente de dispositivos con la nueva entrante.
+ * La ubicación NUNCA se pierde: si el nuevo dato no trae ubicación pero
+ * el anterior sí la tenía, se conserva la anterior.
+ */
+function mergeDeviceList(prev: Device[], incoming: Device[]): Device[] {
+  if (!incoming || incoming.length === 0) return prev;
+  const result = new Map<string, Device>();
+  prev.forEach(d => {
+    const key = d.id || (d.name || '').toLowerCase().trim();
+    if (key) result.set(key, d);
+  });
+  incoming.forEach(d => {
+    const key = d.id || (d.name || '').toLowerCase().trim();
+    if (!key) return;
+    const existing = result.get(key);
+    if (!existing) {
+      result.set(key, d);
+    } else {
+      result.set(key, {
+        ...existing,
+        ...d,
+        location: d.location ?? existing.location,
+      });
+    }
+  });
+  return Array.from(result.values());
+}
+
 export function useExtension(extensionId?: string) {
   const [state, setState] = useState<ExtensionState>({
     isConnected: false,
@@ -133,7 +162,7 @@ export function useExtension(extensionId?: string) {
               } else if (response && response.devices) {
                 setState((prev) => ({
                   ...prev,
-                  devices: response.devices,
+                  devices: mergeDeviceList(prev.devices, response.devices),
                   lastUpdate: response.lastUpdate || Date.now(),
                   error: null,
                 }));
@@ -238,7 +267,7 @@ export function useExtension(extensionId?: string) {
         if (message.devices) {
           setState((prev) => ({
             ...prev,
-            devices: message.devices!,
+            devices: mergeDeviceList(prev.devices, message.devices!),
             lastUpdate: message.timestamp || Date.now(),
           }));
         }
@@ -270,7 +299,7 @@ export function useExtension(extensionId?: string) {
         if (data.devices) {
           setState((prev) => ({
             ...prev,
-            devices: data.devices,
+            devices: mergeDeviceList(prev.devices, data.devices),
             lastUpdate: data.timestamp || Date.now(),
             isConnected: true,
             isLoading: false,
