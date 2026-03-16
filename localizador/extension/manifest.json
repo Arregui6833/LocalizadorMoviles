@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Device Tracker Monitor",
+  "version": "1.0.0",
+  "description": "Monitor your devices from Google Find My Device",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.google.com/android/find/*",
+    "http://localhost:*/*",
+    "https://*.vercel.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.google.com/android/find/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "http://localhost:*/*",
+      "https://*.vercel.app/*"
+    ]
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  }
+}
