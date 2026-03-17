@@ -12,18 +12,28 @@ import {
   Clock,
   Signal,
   SignalZero,
+  User,
+  Eye,
 } from "lucide-react";
 
 interface DeviceListProps {
   devices: Device[];
   selectedDevice: string | null;
   onSelectDevice: (id: string) => void;
+  myDeviceId?: string | null;
+  watchedDeviceId?: string | null;
+  onSetMyDevice?: (id: string) => void;
+  onSetWatchedDevice?: (id: string) => void;
 }
 
 export function DeviceList({
   devices,
   selectedDevice,
   onSelectDevice,
+  myDeviceId,
+  watchedDeviceId,
+  onSetMyDevice,
+  onSetWatchedDevice,
 }: DeviceListProps) {
   if (devices.length === 0) {
     return (
@@ -48,7 +58,11 @@ export function DeviceList({
           key={device.id}
           device={device}
           isSelected={device.id === selectedDevice}
+          isMyDevice={device.id === myDeviceId}
+          isWatchedDevice={device.id === watchedDeviceId}
           onClick={() => onSelectDevice(device.id)}
+          onSetMyDevice={onSetMyDevice ? () => onSetMyDevice(device.id) : undefined}
+          onSetWatchedDevice={onSetWatchedDevice ? () => onSetWatchedDevice(device.id) : undefined}
         />
       ))}
     </div>
@@ -58,13 +72,28 @@ export function DeviceList({
 interface DeviceCardProps {
   device: Device;
   isSelected: boolean;
+  isMyDevice?: boolean;
+  isWatchedDevice?: boolean;
   onClick: () => void;
+  onSetMyDevice?: () => void;
+  onSetWatchedDevice?: () => void;
 }
 
-function DeviceCard({ device, isSelected, onClick }: DeviceCardProps) {
+function DeviceCard({
+  device,
+  isSelected,
+  isMyDevice,
+  isWatchedDevice,
+  onClick,
+  onSetMyDevice,
+  onSetWatchedDevice,
+}: DeviceCardProps) {
   const isTablet =
     device.model?.toLowerCase().includes("tab") ||
     device.name.toLowerCase().includes("tablet");
+
+  const hasRealLocation =
+    device.location != null && device.location.lat != null && device.location.lng != null;
 
   const getBatteryIcon = () => {
     if (!device.battery) return <Battery className="w-4 h-4" />;
@@ -103,83 +132,138 @@ function DeviceCard({ device, isSelected, onClick }: DeviceCardProps) {
   const displayLastSeen = device.activity || formatLastSeen(device.lastSeen);
 
   return (
-    <button
-      onClick={onClick}
-      className={cn(
-        "w-full p-4 rounded-lg border text-left transition-all duration-200",
-        "hover:border-primary/50 hover:bg-secondary/50",
-        isSelected
-          ? "border-primary bg-secondary"
-          : "border-border bg-card"
-      )}
-    >
-      <div className="flex items-start gap-3">
-        {/* Icono del dispositivo */}
-        <div
-          className={cn(
-            "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
-            device.isOnline ? "bg-primary/20" : "bg-muted"
-          )}
-        >
-          {isTablet ? (
-            <Tablet
-              className={cn(
-                "w-5 h-5",
-                device.isOnline ? "text-primary" : "text-muted-foreground"
-              )}
-            />
-          ) : (
-            <Smartphone
-              className={cn(
-                "w-5 h-5",
-                device.isOnline ? "text-primary" : "text-muted-foreground"
-              )}
-            />
-          )}
-        </div>
-
-        {/* Info del dispositivo */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h3 className="font-medium text-sm truncate">{device.name}</h3>
-            {device.isOnline ? (
-              <Signal className="w-3 h-3 text-success shrink-0" />
+    <div className="relative group">
+      <button
+        onClick={onClick}
+        className={cn(
+          "w-full p-4 rounded-lg border text-left transition-all duration-200",
+          "hover:bg-secondary/50",
+          // Green border when device has real GPS coordinates
+          hasRealLocation && !isSelected
+            ? "border-success/60 hover:border-success"
+            : isSelected
+            ? "border-primary bg-secondary"
+            : "border-border bg-card hover:border-primary/50",
+          // Role-based ring
+          isMyDevice && "ring-2 ring-blue-500/60",
+          isWatchedDevice && "ring-2 ring-orange-500/60"
+        )}
+      >
+        <div className="flex items-start gap-3">
+          {/* Icono del dispositivo */}
+          <div
+            className={cn(
+              "w-10 h-10 rounded-lg flex items-center justify-center shrink-0",
+              device.isOnline ? "bg-primary/20" : "bg-muted"
+            )}
+          >
+            {isTablet ? (
+              <Tablet
+                className={cn(
+                  "w-5 h-5",
+                  device.isOnline ? "text-primary" : "text-muted-foreground"
+                )}
+              />
             ) : (
-              <SignalZero className="w-3 h-3 text-muted-foreground shrink-0" />
+              <Smartphone
+                className={cn(
+                  "w-5 h-5",
+                  device.isOnline ? "text-primary" : "text-muted-foreground"
+                )}
+              />
             )}
           </div>
 
-          {device.model && (
-            <p className="text-xs text-muted-foreground truncate mt-0.5">
-              {device.model}
-            </p>
-          )}
-
-          {/* Metadatos */}
-          <div className="flex flex-wrap items-center gap-3 mt-2">
-            {device.battery !== null && (
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                {getBatteryIcon()}
-                <span>{device.battery}%</span>
-              </div>
-            )}
-
-            {device.location?.address && (
-              <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                <MapPin className="w-3 h-3" />
-                <span className="truncate max-w-[100px]">
-                  {device.location.address}
+          {/* Info del dispositivo */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-medium text-sm truncate">{device.name}</h3>
+              {device.isOnline ? (
+                <Signal className="w-3 h-3 text-success shrink-0" />
+              ) : (
+                <SignalZero className="w-3 h-3 text-muted-foreground shrink-0" />
+              )}
+              {/* Role badges */}
+              {isMyDevice && (
+                <span className="text-[10px] bg-blue-500/20 text-blue-400 rounded px-1 py-0.5 shrink-0">
+                  Mío
                 </span>
-              </div>
+              )}
+              {isWatchedDevice && (
+                <span className="text-[10px] bg-orange-500/20 text-orange-400 rounded px-1 py-0.5 shrink-0">
+                  Vigilado
+                </span>
+              )}
+            </div>
+
+            {device.model && (
+              <p className="text-xs text-muted-foreground truncate mt-0.5">
+                {device.model}
+              </p>
             )}
 
-            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Clock className="w-3 h-3" />
-              <span>{displayLastSeen}</span>
+            {/* Metadatos */}
+            <div className="flex flex-wrap items-center gap-3 mt-2">
+              {device.battery !== null && (
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  {getBatteryIcon()}
+                  <span>{device.battery}%</span>
+                </div>
+              )}
+
+              {hasRealLocation && (
+                <div className="flex items-center gap-1 text-xs text-success">
+                  <MapPin className="w-3 h-3" />
+                  <span className="truncate max-w-[100px]">
+                    {device.location?.address ||
+                      `${device.location!.lat!.toFixed(4)}, ${device.location!.lng!.toFixed(4)}`}
+                  </span>
+                </div>
+              )}
+
+              <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Clock className="w-3 h-3" />
+                <span>{displayLastSeen}</span>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </button>
+      </button>
+
+      {/* Role assignment buttons — shown on hover when callbacks are provided */}
+      {(onSetMyDevice || onSetWatchedDevice) && (
+        <div className="absolute top-2 right-2 hidden group-hover:flex gap-1">
+          {onSetMyDevice && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSetMyDevice(); }}
+              title="Marcar como mi dispositivo"
+              className={cn(
+                "p-1 rounded text-[10px] transition-colors",
+                isMyDevice
+                  ? "bg-blue-500 text-white"
+                  : "bg-secondary text-muted-foreground hover:bg-blue-500/20 hover:text-blue-400"
+              )}
+            >
+              <User className="w-3 h-3" />
+            </button>
+          )}
+          {onSetWatchedDevice && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onSetWatchedDevice(); }}
+              title="Marcar como dispositivo vigilado"
+              className={cn(
+                "p-1 rounded text-[10px] transition-colors",
+                isWatchedDevice
+                  ? "bg-orange-500 text-white"
+                  : "bg-secondary text-muted-foreground hover:bg-orange-500/20 hover:text-orange-400"
+              )}
+            >
+              <Eye className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
+

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { DeviceMap } from "@/components/device-map";
 import { DeviceList } from "@/components/device-list";
@@ -16,14 +16,50 @@ import {
   Smartphone,
   Battery,
   Clock,
+  User,
+  Eye,
+  AlertTriangle,
+  Navigation,
+  Bell,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+/** Returns the distance in metres between two lat/lng points (Haversine formula). */
+function haversineMeters(
+  lat1: number, lng1: number,
+  lat2: number, lng2: number
+): number {
+  const R = 6371000;
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+type MonitorMode = "movement" | "approaching" | null;
 
 export function Dashboard() {
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+
+  // Role assignment
+  const [myDeviceId, setMyDeviceId] = useState<string | null>(null);
+  const [watchedDeviceId, setWatchedDeviceId] = useState<string | null>(null);
+
+  // Proximity monitoring
+  const [monitorMode, setMonitorMode] = useState<MonitorMode>(null);
+  const [monitorActive, setMonitorActive] = useState(false);
+  const [monitorAlert, setMonitorAlert] = useState<string | null>(null);
+
+  // Track previous position of watched device for movement detection
+  const prevWatchedPos = useRef<{ lat: number; lng: number } | null>(null);
+  // Track previous distance to my device for approaching detection
+  const prevDistanceRef = useRef<number | null>(null);
 
   const {
     isConnected,
@@ -46,6 +82,49 @@ export function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [devices]);
 
+  // Monitor loop: check positions when monitorActive is true
+  useEffect(() => {
+    if (!monitorActive || !monitorMode || !watchedDeviceId) return;
+
+    const watched = devices.find((d) => d.id === watchedDeviceId);
+    const watchedLat = watched?.location?.lat;
+    const watchedLng = watched?.location?.lng;
+    if (watchedLat == null || watchedLng == null) return;
+
+    if (monitorMode === "movement") {
+      // Mode 1: Alert if watched device moved more than 50 metres from its last known position
+      const prev = prevWatchedPos.current;
+      if (prev != null) {
+        const dist = haversineMeters(prev.lat, prev.lng, watchedLat, watchedLng);
+        if (dist > 50) {
+          setMonitorAlert(
+            `⚠ ${watched!.name} se ha movido ${Math.round(dist)} m desde la última comprobación.`
+          );
+          // Update reference to new position so we only alert on further movement
+          prevWatchedPos.current = { lat: watchedLat, lng: watchedLng };
+        }
+      } else {
+        prevWatchedPos.current = { lat: watchedLat, lng: watchedLng };
+      }
+    } else if (monitorMode === "approaching") {
+      // Mode 2: Alert if watched device is getting closer to my device
+      const myDevice = devices.find((d) => d.id === myDeviceId);
+      const myLat = myDevice?.location?.lat;
+      const myLng = myDevice?.location?.lng;
+      if (myLat == null || myLng == null) return;
+
+      const dist = haversineMeters(myLat, myLng, watchedLat, watchedLng);
+      const prevDist = prevDistanceRef.current;
+      if (prevDist != null && dist < prevDist && dist < 500) {
+        setMonitorAlert(
+          `⚠ ${watched!.name} se está acercando a tu dispositivo (${Math.round(dist)} m).`
+        );
+      }
+      prevDistanceRef.current = dist;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [devices, monitorActive, monitorMode, watchedDeviceId, myDeviceId]);
+
   const handleRefresh = async () => {
     await fetchDevices();
     setLastRefresh(new Date());
@@ -60,7 +139,29 @@ export function Dashboard() {
     setIsMonitoring(!isMonitoring);
   };
 
+  const handleStartMonitor = () => {
+    if (!monitorMode) return;
+    // Reset reference positions when starting fresh
+    prevWatchedPos.current = null;
+    prevDistanceRef.current = null;
+    setMonitorAlert(null);
+    setMonitorActive(true);
+  };
+
+  const handleStopMonitor = () => {
+    setMonitorActive(false);
+    prevWatchedPos.current = null;
+    prevDistanceRef.current = null;
+  };
+
   const selectedDeviceData = devices.find((d) => d.id === selectedDevice);
+  const myDeviceData = devices.find((d) => d.id === myDeviceId);
+  const watchedDeviceData = devices.find((d) => d.id === watchedDeviceId);
+
+  const canStartMonitor =
+    monitorMode != null &&
+    watchedDeviceId != null &&
+    (monitorMode === "movement" || (monitorMode === "approaching" && myDeviceId != null));
 
   // Estadisticas
   const stats = {
@@ -177,10 +278,26 @@ export function Dashboard() {
           </div>
         </div>
 
+        {/* Monitoring Alert */}
+        {monitorAlert && (
+          <div className="mb-4 p-3 rounded-lg border border-orange-500/50 bg-orange-500/10 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm text-orange-400">
+              <Bell className="w-4 h-4 shrink-0" />
+              <span>{monitorAlert}</span>
+            </div>
+            <button
+              onClick={() => setMonitorAlert(null)}
+              className="text-orange-400/60 hover:text-orange-400 text-xs shrink-0"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Main Content */}
         <div className="grid lg:grid-cols-3 gap-6">
-          {/* Device List */}
-          <div className="lg:col-span-1">
+          {/* Device List + Monitoring Panel */}
+          <div className="lg:col-span-1 flex flex-col gap-4">
             <div className="rounded-lg border border-border bg-card">
               <div className="p-4 border-b border-border flex items-center justify-between">
                 <h2 className="font-medium">Dispositivos</h2>
@@ -199,8 +316,111 @@ export function Dashboard() {
                   devices={devices}
                   selectedDevice={selectedDevice}
                   onSelectDevice={setSelectedDevice}
+                  myDeviceId={myDeviceId}
+                  watchedDeviceId={watchedDeviceId}
+                  onSetMyDevice={(id) => setMyDeviceId(id === myDeviceId ? null : id)}
+                  onSetWatchedDevice={(id) => setWatchedDeviceId(id === watchedDeviceId ? null : id)}
                 />
               </div>
+            </div>
+
+            {/* Monitoring Panel */}
+            <div className="rounded-lg border border-border bg-card p-4">
+              <h2 className="font-medium mb-3 flex items-center gap-2">
+                <Navigation className="w-4 h-4 text-primary" />
+                Vigilancia
+              </h2>
+
+              {/* Role summary */}
+              <div className="flex flex-col gap-1 mb-4 text-xs">
+                <div className="flex items-center gap-2">
+                  <User className="w-3 h-3 text-blue-400" />
+                  <span className="text-muted-foreground">Mi dispositivo:</span>
+                  <span className={cn(myDeviceData ? "text-blue-400" : "text-muted-foreground/50")}>
+                    {myDeviceData?.name ?? "Sin seleccionar"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Eye className="w-3 h-3 text-orange-400" />
+                  <span className="text-muted-foreground">Dispositivo vigilado:</span>
+                  <span className={cn(watchedDeviceData ? "text-orange-400" : "text-muted-foreground/50")}>
+                    {watchedDeviceData?.name ?? "Sin seleccionar"}
+                  </span>
+                </div>
+              </div>
+
+              {/* Mode selector */}
+              <div className="flex flex-col gap-2 mb-4">
+                <button
+                  onClick={() => setMonitorMode(monitorMode === "movement" ? null : "movement")}
+                  className={cn(
+                    "flex items-start gap-3 p-3 rounded-lg border text-left text-sm transition-colors",
+                    monitorMode === "movement"
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border hover:border-primary/50 text-muted-foreground"
+                  )}
+                >
+                  <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium text-foreground">Modo 1 — Movimiento</p>
+                    <p className="text-xs mt-0.5">
+                      Alerta si el dispositivo vigilado se mueve más de 50 m de su posición anterior.
+                    </p>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => setMonitorMode(monitorMode === "approaching" ? null : "approaching")}
+                  className={cn(
+                    "flex items-start gap-3 p-3 rounded-lg border text-left text-sm transition-colors",
+                    monitorMode === "approaching"
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border hover:border-primary/50 text-muted-foreground"
+                  )}
+                >
+                  <Navigation className="w-4 h-4 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium text-foreground">Modo 2 — Acercamiento</p>
+                    <p className="text-xs mt-0.5">
+                      Alerta si el dispositivo vigilado se está acercando a tu dispositivo.
+                    </p>
+                  </div>
+                </button>
+              </div>
+
+              {/* Start / Stop button */}
+              {monitorActive ? (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="w-full"
+                  onClick={handleStopMonitor}
+                >
+                  <Pause className="w-4 h-4 mr-2" />
+                  Detener vigilancia
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  className="w-full"
+                  disabled={!canStartMonitor}
+                  onClick={handleStartMonitor}
+                  title={
+                    !canStartMonitor
+                      ? "Selecciona un modo y un dispositivo vigilado (y tu dispositivo para el modo 2)"
+                      : undefined
+                  }
+                >
+                  <Play className="w-4 h-4 mr-2" />
+                  Iniciar vigilancia
+                </Button>
+              )}
+
+              {monitorActive && (
+                <p className="text-xs text-success text-center mt-2">
+                  Vigilancia activa — {monitorMode === "movement" ? "Modo movimiento" : "Modo acercamiento"}
+                </p>
+              )}
             </div>
           </div>
 
@@ -285,3 +505,4 @@ export function Dashboard() {
     </div>
   );
 }
+

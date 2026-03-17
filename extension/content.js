@@ -128,9 +128,14 @@
 
     const uniqueDevices = Array.from(map.values());
 
-    // Filter out devices with no useful info (likely false positives)
-    const filteredDevices = uniqueDevices.filter(device => 
-      device.name && device.name.length > 1 && device.name.length < 100
+    // Filter out devices with no useful info (likely false positives).
+    // Also reject names that still contain transient Google FMD status strings
+    // (e.g. "Galaxy S25Estableciendo conexión con el dispositivo...") which appear
+    // when a device is clicked and the UI shows a connecting animation.
+    const TRANSIENT_NAME_RE = /estableciendo\s+conexi[oó]n|connecting\s+to|buscando\s+ubicaci[oó]n|localizando\s+dispositivo|searching\s+for\s+location/i;
+    const filteredDevices = uniqueDevices.filter(device =>
+      device.name && device.name.length > 1 && device.name.length < 100 &&
+      !TRANSIENT_NAME_RE.test(device.name)
     );
 
     // Si hay marcadores de Google Maps y algún dispositivo no tiene ubicación, intentar asignar
@@ -848,7 +853,7 @@
   function trimDeviceName(text) {
     if (!text) return '';
     return text
-      .replace(/(?:Visto\s+por|visto\s+por|hace\s+\d+|en\s+l[íi]nea|offline|online|desconectado|conectado|activo\s+ahora|en\s+movimiento|last\s+seen|last\s+active|\d{1,3}\s*%|MO\b|Mo\b|restablecer|borrar|marcar\s+como|reproducir|silenciar|localizar|bloquear|protegido|protected|lost\s+mode|modo\s+perdido).*$/i, '')
+      .replace(/(?:Visto\s+por|visto\s+por|hace\s+\d+|en\s+l[íi]nea|offline|online|desconectado|conectado|activo\s+ahora|en\s+movimiento|last\s+seen|last\s+active|\d{1,3}\s*%|MO\b|Mo\b|restablecer|borrar|marcar\s+como|reproducir|silenciar|localizar|bloquear|protegido|protected|lost\s+mode|modo\s+perdido|estableciendo\s+conexi[oó]n|connecting|buscando\s+ubicaci[oó]n|localizando|searching|obteniendo\s+ubicaci[oó]n|getting\s+location|cargando|loading).*$/i, '')
       .trim();
   }
 
@@ -1087,6 +1092,21 @@
 
   // Extraer bateria de un elemento
   function extractBatteryFromElement(el) {
+    // 1) Check the `data-battery` attribute value directly (e.g. <div data-battery="30">)
+    const dataBatVal = el.getAttribute ? el.getAttribute('data-battery') : null;
+    if (dataBatVal !== null && dataBatVal !== '') {
+      const attrVal = parseInt(dataBatVal, 10);
+      if (!isNaN(attrVal) && attrVal >= 0 && attrVal <= 100) return attrVal;
+    }
+    // Also check descendant elements with data-battery attribute
+    if (el.querySelector) {
+      const dataBatEl = el.querySelector('[data-battery]');
+      if (dataBatEl) {
+        const attrVal2 = parseInt(dataBatEl.getAttribute('data-battery') || '', 10);
+        if (!isNaN(attrVal2) && attrVal2 >= 0 && attrVal2 <= 100) return attrVal2;
+      }
+    }
+    // 2) Fallback: look for percentage in text content
     const text = el.textContent || '';
     const match = text.match(/(\d{1,3})\s*%/);
     return match ? parseInt(match[1], 10) : null;
