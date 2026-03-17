@@ -28,6 +28,16 @@
         "*://findmydevice.google.com/*",
         "*://android.google.com/find*"
       ],
+      "js": ["visibility-override.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*/*android/find*",
+        "*://findmydevice.google.com/*",
+        "*://android.google.com/find*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     },

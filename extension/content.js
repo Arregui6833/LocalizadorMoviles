@@ -2117,6 +2117,26 @@
         });
         return true; // Indica que sendResponse será llamado asincronamente
       }
+
+      // FORCE_REFRESH: background service worker triggers this periodically so the
+      // content script pushes fresh device data even when the tab is in the background.
+      // chrome.runtime.onMessage callbacks are NOT throttled like setInterval, so this
+      // runs at full frequency even in a hidden tab.
+      if (message.type === 'FORCE_REFRESH') {
+        if (isFindMyDevicePage()) {
+          extractDevices().then(devices => {
+            lastDevices = devices;
+            notifyDashboard();
+            sendResponse({ devices, refreshed: true });
+          }).catch(e => {
+            log('Error en FORCE_REFRESH:', e.message);
+            sendResponse({ error: e.message });
+          });
+        } else {
+          sendResponse({ skipped: true });
+        }
+        return true;
+      }
       
       if (message.type === 'START_MONITORING') {
         startMonitoring(message.interval || 5000);
@@ -2348,12 +2368,38 @@
   window.__deviceTrackerSimulateClicks = simulateUserClicks;
   window.__deviceTrackerNetworkData = () => getNetworkData();
 
+  // Expose a refresh function that the background service worker can call via
+  // chrome.scripting.executeScript to force a data extract + push even in background tabs.
+  window.__deviceTrackerRefresh = function() {
+    if (!isFindMyDevicePage()) return;
+    extractDevices().then(devices => {
+      lastDevices = devices;
+      notifyDashboard();
+    }).catch(e => log('Error en __deviceTrackerRefresh:', e.message));
+  };
+
   // Las operaciones de extracción, clic y monitoreo sólo tienen sentido en la página
   // de Google Find My Device. En el dashboard (localhost, vercel, etc.) el content script
   // sólo actúa como puente de mensajes (chrome.runtime.onMessage → window.postMessage).
   if (isFindMyDevicePage()) {
     // Enganchar el API de Google Maps lo antes posible
     hookGoogleMapsAPI();
+
+    // Keep the background service worker alive by maintaining an open port.
+    // The SW can then run its own fast interval to drive FORCE_REFRESH messages
+    // to this content script without being subject to tab-throttling.
+    (function maintainServiceWorkerConnection() {
+      try {
+        const port = chrome.runtime.connect({ name: 'keepAlivePort' });
+        port.onDisconnect.addListener(() => {
+          // Reconnect after a brief pause so we don't hammer on errors
+          setTimeout(maintainServiceWorkerConnection, 5000);
+        });
+      } catch (e) {
+        log('keepAlive port error:', e.message);
+        setTimeout(maintainServiceWorkerConnection, 10000);
+      }
+    })();
 
     // Iniciar monitoreo automaticamente con delay mayor para esperar carga
     setTimeout(() => {
@@ -2385,3 +2431,4 @@
   }
 
 })();
+
