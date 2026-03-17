@@ -77,7 +77,7 @@
 
     const isGeneratedId = (id) => {
       if (!id) return true;
-      return /^(text|interactive|panel|marker)-/.test(id);
+      return /^(text|interactive|panel|marker|pos)-/.test(id);
     };
 
     const map = new Map();
@@ -605,6 +605,15 @@
     return text || null;
   }
 
+  // Generar un ID estable (no basado en timestamp) a partir del prefijo y el nombre
+  // del dispositivo. Así el mismo dispositivo siempre recibe el mismo ID aunque el
+  // content script se reinicie, evitando duplicados en el dashboard.
+  function generateStableId(prefix, name) {
+    if (!name) return `${prefix}-unknown-${Math.random().toString(36).slice(2, 8)}`;
+    const slug = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return `${prefix}-${slug || 'device'}`;
+  }
+
   // Eliminar sufijos de metadata que a veces se concatenan al nombre del dispositivo
   // sin espacio (p.ej. "Galaxy S25Visto por última vez: hace 2 minutos" → "Galaxy S25").
   // Esto ocurre porque el DOM de Google FMD coloca el nombre y el estado en elementos hermanos
@@ -729,7 +738,7 @@
       const coords = extractCoordinatesFromText(containerText);
 
       devices.push({
-        id: `text-${devices.length}-${Date.now()}`,
+        id: generateStableId('text', name),
         name,
         battery: batteryMatch ? parseInt(batteryMatch[1], 10) : null,
         lastSeen: timeMatch ? timeMatch[1] || timeMatch[0] : null,
@@ -817,7 +826,7 @@
         const name = heading.textContent?.trim();
         if (name && name.length > 1) {
           devices.push({
-            id: `panel-${Date.now()}`,
+            id: generateStableId('panel', name),
             name: name,
             battery: extractBatteryFromElement(panel),
             lastSeen: extractTimeFromElement(panel),
@@ -1431,7 +1440,7 @@
             obj.imei ||
             obj.serialNumber ||
             obj.esn ||
-            `net-${Date.now()}-${(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.random().toString(16).slice(2))}`,
+            generateStableId('net', name),
           name,
           battery,
           lastSeen:
@@ -1579,10 +1588,12 @@
       }
 
       if (name && name.length >= 2 && name.length <= 120) {
-        // Tiene nombre real → crear dispositivo completo
+        // Tiene nombre real → crear dispositivo completo.
+        // El ID es estable (basado en el nombre) para que no cambie entre extracciones
+        // y el dashboard pueda actualizar el dispositivo existente en lugar de crear uno nuevo.
         log(`[position] Encontrado con nombre: ${name} → lat:${lat} lng:${lng} bat:${battery}`);
         devices.push({
-          id: `pos-${idx}-${Date.now()}`,
+          id: generateStableId('pos', name),
           name,
           battery,
           lastSeen: null,

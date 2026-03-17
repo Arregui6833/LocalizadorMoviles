@@ -38,35 +38,82 @@ const EXTENSION_WINDOW_SOURCE = "device-tracker-monitor";
 const WINDOW_MESSAGE_TIMEOUT = 2500;
 
 /**
+ * Normaliza el nombre de un dispositivo para usarlo como clave de deduplicación.
+ * Elimina acentos, puntuación y espacios extra, y lo pone en minúsculas.
+ */
+function normalizeDeviceName(name: string): string {
+  if (!name) return '';
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Combina la lista existente de dispositivos con la nueva entrante.
  * - Los dispositivos nuevos se añaden.
  * - Los existentes se actualizan (batería, lastSeen, actividad, etc.).
  * - La ubicación NUNCA se pierde: si el nuevo dato no tiene ubicación pero
  *   el anterior sí, se conserva la ubicación anterior.
+ * - Se usa el nombre normalizado como clave de deduplicación secundaria para
+ *   evitar duplicados cuando el ID del dispositivo cambia entre extracciones
+ *   (p.ej. tras recargar la página o reiniciar el content script).
  * Esto evita que el dashboard pierda datos entre ciclos de actualización del DOM.
  */
 function mergeDeviceList(prev: Device[], incoming: Device[]): Device[] {
   if (!incoming || incoming.length === 0) return prev;
+
   const result = new Map<string, Device>();
+  // Mapa secundario: nombre normalizado → clave principal en `result`
+  const nameToKey = new Map<string, string>();
+
   prev.forEach(d => {
-    const key = d.id || (d.name || '').toLowerCase().trim();
-    if (key) result.set(key, d);
-  });
-  incoming.forEach(d => {
-    const key = d.id || (d.name || '').toLowerCase().trim();
+    const key = (d.id && d.id.trim()) ? d.id : normalizeDeviceName(d.name);
     if (!key) return;
-    const existing = result.get(key);
+    result.set(key, d);
+    const nname = normalizeDeviceName(d.name);
+    if (nname) nameToKey.set(nname, key);
+  });
+
+  incoming.forEach(d => {
+    const key = (d.id && d.id.trim()) ? d.id : normalizeDeviceName(d.name);
+    if (!key) return;
+    const nname = normalizeDeviceName(d.name);
+
+    // Buscar primero por clave exacta (ID o nombre)
+    let existing = result.get(key);
+    let useKey = key;
+
+    // Si no se encontró por clave exacta, intentar por nombre normalizado.
+    // Esto cubre el caso donde el ID ha cambiado (nuevo timestamp, reinicio del script).
+    if (!existing && nname) {
+      const prevKey = nameToKey.get(nname);
+      if (prevKey && prevKey !== key) {
+        existing = result.get(prevKey);
+        if (existing) {
+          // Eliminar la entrada antigua y usar la nueva clave
+          result.delete(prevKey);
+          useKey = key;
+        }
+      }
+    }
+
     if (!existing) {
-      result.set(key, d);
+      result.set(useKey, d);
     } else {
-      result.set(key, {
+      result.set(useKey, {
         ...existing,
         ...d,
         // nunca sobreescribir una ubicación conocida con null
         location: d.location ?? existing.location,
       });
     }
+    if (nname) nameToKey.set(nname, useKey);
   });
+
   return Array.from(result.values());
 }
 
