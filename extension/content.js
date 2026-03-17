@@ -224,8 +224,9 @@
     // incluso cuando la SPA de Google FMD está en transición entre vistas
     const stableResult = Array.from(stableDeviceCache.values());
 
-    // Intentar hacer clic en dispositivos que no tienen ubicación para extraerla
-    const devicesWithoutLocation = stableResult.filter(d => !d.location);
+    // Intentar hacer clic en dispositivos que no tienen ubicación real para extraerla.
+    // Incluye dispositivos con location=null, location vacía {lat:null}, o solo dirección sin coords.
+    const devicesWithoutLocation = stableResult.filter(d => !hasRealLocation(d.location) || d.location?.lat == null);
     if (devicesWithoutLocation.length > 0) {
       simulateUserClicks(devicesWithoutLocation);
     }
@@ -339,9 +340,38 @@
           clickElement(clickable);
 
           log('✓ Click enviado, esperando carga de detalles...');
-          await delay(2000);
+          // Esperar hasta que el panel de detalles aparezca (polling cada 400ms, máx 3s).
+          // Esto evita el peor caso de esperar siempre 3s cuando el panel carga más rápido.
+          {
+            const DETAIL_SELECTOR = '[role="complementary"], [role="region"], aside, .detail-panel, #device-details, .device-details';
+            let waited = 0;
+            const MAX_WAIT = 3000;
+            const POLL_INTERVAL = 400;
+            while (waited < MAX_WAIT) {
+              await delay(POLL_INTERVAL);
+              waited += POLL_INTERVAL;
+              const panelReady = document.querySelector(DETAIL_SELECTOR);
+              const hasNewPosition = (() => {
+                for (const el of document.querySelectorAll('[position]')) {
+                  const pv = (el.getAttribute('position') || '').trim();
+                  if (!COORD_ATTR_RE.test(pv)) continue;
+                  if (!positionsBefore.has(el) || positionsBefore.get(el) !== pv) return true;
+                }
+                return false;
+              })();
+              if (panelReady && hasNewPosition) {
+                log('✓ Panel y nueva posición detectados tras', waited, 'ms');
+                break;
+              }
+              if (panelReady && waited >= POLL_INTERVAL * 3) {
+                // Panel visible y esperamos al menos 1.2s adicionales — suficiente
+                break;
+              }
+            }
+          }
 
           // PASO C.2: Diff de [position] post-clic → ubicación específica del dispositivo clickeado.
+          // Detecta elementos [position] nuevos o con valor cambiado tras el clic.
           let snapshotLocation = null;
           document.querySelectorAll('[position]').forEach(el => {
             if (snapshotLocation) return; // ya encontramos una
@@ -360,15 +390,84 @@
             }
           });
 
+          // PASO C.3: Si el diff no encontró nada, buscar el marcador activo/seleccionado.
+          // Google Maps puede marcar el marcador del dispositivo seleccionado con atributos/clases de estado.
+          if (!snapshotLocation) {
+            snapshotLocation = findSelectedPositionMarker();
+            if (snapshotLocation) {
+              log('[active-marker] Marcador activo para:', device.name, '→', snapshotLocation.lat, snapshotLocation.lng);
+            }
+          }
+
+          // PASO C.4: Si aún no hay posición, buscar [position] en el subtree del panel de detalles.
+          // El panel de detalles puede mostrar un mini-mapa con el marcador del dispositivo.
+          if (!snapshotLocation) {
+            const detailPanelForPos = document.querySelector(
+              '[role="complementary"], [role="region"], aside, .detail-panel, #device-details, .device-details'
+            );
+            if (detailPanelForPos) {
+              const panelPosEls = detailPanelForPos.querySelectorAll('[position]');
+              for (const pel of panelPosEls) {
+                const pv = (pel.getAttribute('position') || '').trim();
+                const m = pv.match(COORD_ATTR_RE);
+                if (m) {
+                  const lat = parseFloat(m[1]);
+                  const lng = parseFloat(m[2]);
+                  if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+                    snapshotLocation = { lat, lng, address: null };
+                    log('[detail-panel-pos] Posición en panel de detalles para:', device.name, '→', lat, lng);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+
+          // PASO C.5: Si solo hay UN elemento [position] válido en todo el DOM, es del dispositivo clickeado.
+          // Esto ocurre cuando Google FMD muestra solo el marcador del dispositivo seleccionado.
+          if (!snapshotLocation) {
+            const allValidPositions = Array.from(document.querySelectorAll('[position]')).filter(el => {
+              const pv = (el.getAttribute('position') || '').trim();
+              return COORD_ATTR_RE.test(pv);
+            });
+            if (allValidPositions.length === 1) {
+              const pv = (allValidPositions[0].getAttribute('position') || '').trim();
+              const m = pv.match(COORD_ATTR_RE);
+              if (m) {
+                const lat = parseFloat(m[1]);
+                const lng = parseFloat(m[2]);
+                if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+                  snapshotLocation = { lat, lng, address: null };
+                  log('[single-pos] Única posición en DOM para:', device.name, '→', lat, lng);
+                }
+              }
+            }
+          }
+
+          // Capturar batería y lastSeen del panel de detalles para enriquecer el dispositivo
+          let panelBattery = null;
+          let panelLastSeen = null;
+          try {
+            const activePanel = document.querySelector(
+              '[role="complementary"], [role="region"], aside, .detail-panel, #device-details, .device-details'
+            );
+            if (activePanel) {
+              panelBattery = extractBatteryFromElement(activePanel);
+              panelLastSeen = extractTimeFromElement(activePanel);
+            }
+          } catch(e) { /* ignorar */ }
+
           if (snapshotLocation) {
             // Actualizar directamente en stableDeviceCache para este dispositivo
             const cacheKey = normalizeName(device.name);
             const cached = stableDeviceCache.get(cacheKey);
-            if (cached) {
-              stableDeviceCache.set(cacheKey, { ...cached, location: snapshotLocation });
-            } else {
-              stableDeviceCache.set(cacheKey, { ...device, location: snapshotLocation });
-            }
+            const enriched = {
+              ...(cached || device),
+              location: snapshotLocation,
+              battery: panelBattery ?? cached?.battery ?? device.battery,
+              lastSeen: panelLastSeen ?? cached?.lastSeen ?? device.lastSeen,
+            };
+            stableDeviceCache.set(cacheKey, enriched);
             // También en networkData para que otras partes del código lo encuentren
             const existingNet = networkData.find(d =>
               (d.name || '').toLowerCase() === deviceName ||
@@ -376,8 +475,10 @@
             );
             if (existingNet) {
               existingNet.location = snapshotLocation;
+              if (panelBattery != null) existingNet.battery = panelBattery;
+              if (panelLastSeen) existingNet.lastSeen = panelLastSeen;
             } else {
-              networkData.push({ name: device.name, location: snapshotLocation, source: 'position-snapshot' });
+              networkData.push({ name: device.name, location: snapshotLocation, battery: panelBattery, lastSeen: panelLastSeen, source: 'position-snapshot' });
             }
             log('[snapshot] Caché actualizada para:', device.name, snapshotLocation);
           }
@@ -603,6 +704,41 @@
     
     // 4. Si nada, NO devolver nada
     log('❌ No se encontró elemento clickeable en lista');
+    return null;
+  }
+
+  // Buscar el marcador de posición [position] que está actualmente "seleccionado" o "activo".
+  // Se usa después de un clic en un dispositivo cuando el diff de snapshot no encontró cambios.
+  // Google Maps puede marcar el marcador activo con atributos o clases de estado.
+  function findSelectedPositionMarker() {
+    const allPositionEls = document.querySelectorAll('[position]');
+    for (const el of allPositionEls) {
+      const pv = (el.getAttribute('position') || '').trim();
+      const m = pv.match(COORD_ATTR_RE);
+      if (!m) continue;
+
+      // Comprobar si el elemento o algún ancestro cercano tiene indicadores de "seleccionado/activo"
+      const isSelected =
+        el.hasAttribute('selected') ||
+        el.hasAttribute('active') ||
+        el.hasAttribute('focused') ||
+        el.getAttribute('aria-selected') === 'true' ||
+        el.getAttribute('aria-current') === 'true' ||
+        el.classList.contains('selected') ||
+        el.classList.contains('active') ||
+        el.classList.contains('focused') ||
+        el.classList.contains('highlighted') ||
+        el.closest('[selected], [active], [aria-selected="true"], .selected, .active, .highlighted, .focused') !== null;
+
+      if (isSelected) {
+        const lat = parseFloat(m[1]);
+        const lng = parseFloat(m[2]);
+        if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+          log('[active-marker] Marcador seleccionado encontrado:', lat, lng);
+          return { lat, lng, address: null };
+        }
+      }
+    }
     return null;
   }
 
@@ -1631,6 +1767,18 @@
         if (textChild) {
           name = textChild.getAttribute('aria-label') || textChild.getAttribute('title') || textChild.textContent?.trim() || null;
         }
+      }
+      // 2b) Shadow DOM del elemento (gmp-advanced-marker usa shadow DOM para su contenido interno)
+      if (!name) {
+        try {
+          const shadowRoot = el.shadowRoot;
+          if (shadowRoot) {
+            const shadowEl = shadowRoot.querySelector('[aria-label], [title], .device-name, .label, .marker-label, h1, h2, h3, strong');
+            if (shadowEl) {
+              name = shadowEl.getAttribute('aria-label') || shadowEl.getAttribute('title') || shadowEl.textContent?.trim() || null;
+            }
+          }
+        } catch(e) { /* shadowRoot puede no ser accesible en algunos contextos */ }
       }
       // 3) Si aún no, ir al padre y buscar texto/atributo que parezca nombre de dispositivo
       if (!name) {
