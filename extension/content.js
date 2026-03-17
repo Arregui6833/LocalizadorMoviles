@@ -30,6 +30,28 @@
     );
   }
 
+  // Normalizar nombre de dispositivo (elimina acentos, puntuación y espacios extra).
+  // Se usa como clave de deduplicación en stableDeviceCache y en el merge.
+  function normalizeName(name) {
+    if (!name) return '';
+    return name
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/\p{Diacritic}/gu, '')
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Comprueba si una ubicación tiene coordenadas o dirección reales (no solo un objeto vacío).
+  // Evita sobreescribir ubicaciones conocidas con objetos de ubicación vacíos.
+  function hasRealLocation(loc) {
+    return loc != null && (loc.lat != null || (typeof loc.address === 'string' && loc.address.length > 0));
+  }
+
+  // Regex para validar coordenadas en formato "lat,lng" — usado en múltiples partes del script.
+  const COORD_ATTR_RE = /^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/;
+
   // Funcion principal para extraer dispositivos
   async function extractDevices() {
     log('Extrayendo dispositivos...');
@@ -64,17 +86,7 @@
     devices.push(...extractedFromPosition);
 
     // Eliminar duplicados por nombre/id
-    const normalizeName = (name) => {
-      if (!name) return "";
-      return name
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/\p{Diacritic}/gu, "")
-        .replace(/[^\p{L}\p{N}\s]/gu, "") // eliminar puntuación para evitar acumulación de "Galaxy S25" vs "Galaxy S25."
-        .replace(/\s+/g, " ")
-        .trim();
-    };
-
+    // normalizeName se define a nivel de módulo (ver arriba)
     const isGeneratedId = (id) => {
       if (!id) return true;
       return /^(text|interactive|panel|marker|pos)-/.test(id);
@@ -136,11 +148,11 @@
       });
     }
 
-    // Asignar coordenadas anónimas de atributos [position] a dispositivos sin ubicación
+    // Asignar coordenadas anónimas de atributos [position] a dispositivos sin ubicación real
     if (positionCoords.length > 0) {
       let posIdx = 0;
       filteredDevices.forEach(device => {
-        if (!device.location && posIdx < positionCoords.length) {
+        if (!hasRealLocation(device.location) && posIdx < positionCoords.length) {
           const pc = positionCoords[posIdx++];
           device.location = { lat: pc.lat, lng: pc.lng, address: null };
           // Si el dispositivo no tiene batería y la coords anónima la tiene, usarla
@@ -152,12 +164,12 @@
       });
     }
 
-    // Si aún no hay ubicación, buscar coordenadas globales en la página
+    // Si aún no hay ubicación real, buscar coordenadas globales en la página
     const pageText = document.body.innerText;
     const globalCoords = extractCoordinatesFromText(pageText);
     if (globalCoords) {
       filteredDevices.forEach(device => {
-        if (!device.location) {
+        if (!hasRealLocation(device.location)) {
           device.location = globalCoords;
         }
       });
@@ -177,27 +189,29 @@
           ...cached,
           ...device,
           id: cached.id, // mantener el ID estable para que el dashboard no lo pierda
-          location: device.location || cached.location, // nunca borrar una ubicación ya conocida
+          // Usar la ubicación más concreta disponible: nunca sobreescribir una ubicación real
+          // con un objeto de ubicación vacío {lat: null, lng: null, address: null}.
+          location: hasRealLocation(device.location) ? device.location : (cached.location || device.location),
         });
       }
     });
 
     // Si tenemos datos de red con ubicación, actualizar la caché también
     networkData.forEach(nd => {
-      if (!nd.name || !nd.location) return;
+      if (!nd.name || !hasRealLocation(nd.location)) return;
       const cacheKey = normalizeName(nd.name);
       if (!cacheKey) return;
       const cached = stableDeviceCache.get(cacheKey);
-      if (cached && !cached.location) {
+      if (cached && !hasRealLocation(cached.location)) {
         stableDeviceCache.set(cacheKey, { ...cached, location: nd.location });
       }
     });
 
-    // Asignar coordenadas de [position] anónimas a entradas de caché sin ubicación
+    // Asignar coordenadas de [position] anónimas a entradas de caché sin ubicación real
     if (positionCoords.length > 0) {
       let pi = 0;
       for (const [key, cached] of stableDeviceCache) {
-        if (!cached.location && pi < positionCoords.length) {
+        if (!hasRealLocation(cached.location) && pi < positionCoords.length) {
           const pc = positionCoords[pi++];
           const updated = { ...cached, location: { lat: pc.lat, lng: pc.lng, address: null } };
           if (cached.battery == null && pc.battery != null) updated.battery = pc.battery;
@@ -312,25 +326,78 @@
           log('PASO C: Haciendo clic en dispositivo:', device.name);
           clickable.scrollIntoView({ behavior: 'smooth', block: 'center' });
           await delay(300);
+
+          // PASO C.1: Tomar snapshot de los [position] ANTES del clic para detectar cambios.
+          // Cuando hacemos clic en un dispositivo, su marcador puede aparecer por primera vez
+          // o moverse en el mapa → detectamos eso con el diff.
+          const positionsBefore = new Map(); // element → positionValue
+          document.querySelectorAll('[position]').forEach(el => {
+            const pv = (el.getAttribute('position') || '').trim();
+            if (COORD_ATTR_RE.test(pv)) positionsBefore.set(el, pv);
+          });
+
           clickElement(clickable);
 
           log('✓ Click enviado, esperando carga de detalles...');
           await delay(2000);
 
+          // PASO C.2: Diff de [position] post-clic → ubicación específica del dispositivo clickeado.
+          let snapshotLocation = null;
+          document.querySelectorAll('[position]').forEach(el => {
+            if (snapshotLocation) return; // ya encontramos una
+            const pv = (el.getAttribute('position') || '').trim();
+            const m = pv.match(COORD_ATTR_RE);
+            if (!m) return;
+            const prevVal = positionsBefore.get(el);
+            if (prevVal === undefined || prevVal !== pv) {
+              // Elemento nuevo o con posición cambiada → pertenece al dispositivo clickeado
+              const lat = parseFloat(m[1]);
+              const lng = parseFloat(m[2]);
+              if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+                snapshotLocation = { lat, lng, address: null };
+                log('[snapshot] Posición detectada para', device.name, '→', lat, lng);
+              }
+            }
+          });
+
+          if (snapshotLocation) {
+            // Actualizar directamente en stableDeviceCache para este dispositivo
+            const cacheKey = normalizeName(device.name);
+            const cached = stableDeviceCache.get(cacheKey);
+            if (cached) {
+              stableDeviceCache.set(cacheKey, { ...cached, location: snapshotLocation });
+            } else {
+              stableDeviceCache.set(cacheKey, { ...device, location: snapshotLocation });
+            }
+            // También en networkData para que otras partes del código lo encuentren
+            const existingNet = networkData.find(d =>
+              (d.name || '').toLowerCase() === deviceName ||
+              (d.name || '').toLowerCase().includes(deviceName.split(' ')[0])
+            );
+            if (existingNet) {
+              existingNet.location = snapshotLocation;
+            } else {
+              networkData.push({ name: device.name, location: snapshotLocation, source: 'position-snapshot' });
+            }
+            log('[snapshot] Caché actualizada para:', device.name, snapshotLocation);
+          }
+
           // PASO D: Esperar captura de datos de ubicación desde la API interceptada
           log('PASO D: Esperando captura de ubicación desde API...');
-          let locationCaptured = false;
-          for (let t = 0; t < 5000; t += 500) {
-            const netDevice = networkData.find(d =>
-              d.name?.toLowerCase() === deviceName ||
-              d.name?.toLowerCase().includes(deviceName.split(' ')[0])
-            );
-            if (netDevice?.location?.lat && netDevice?.location?.lng) {
-              locationCaptured = true;
-              log('✓ Ubicación capturada desde red:', netDevice.location);
-              break;
+          let locationCaptured = !!snapshotLocation; // ya tenemos ubicación si el diff funcionó
+          if (!locationCaptured) {
+            for (let t = 0; t < 5000; t += 500) {
+              const netDevice = networkData.find(d =>
+                d.name?.toLowerCase() === deviceName ||
+                d.name?.toLowerCase().includes(deviceName.split(' ')[0])
+              );
+              if (netDevice?.location?.lat && netDevice?.location?.lng) {
+                locationCaptured = true;
+                log('✓ Ubicación capturada desde red:', netDevice.location);
+                break;
+              }
+              await delay(500);
             }
-            await delay(500);
           }
 
           // Si la red no capturó la ubicación, intentar extraerla del DOM del panel de detalles
@@ -339,8 +406,12 @@
             const detailPanel = document.querySelector(
               '[role="complementary"], [role="region"], aside, .detail-panel, #device-details, .device-details'
             );
-            const domLocation = extractLocationFromPanel(detailPanel || document);
-            if (domLocation && (domLocation.lat || domLocation.address)) {
+            // Para evitar asignar una posición incorrecta (de otro dispositivo), buscamos
+            // primero en el panel de detalles; solo fallback a document si no hay panel.
+            const domLocation = detailPanel
+              ? extractLocationFromPanel(detailPanel)
+              : extractLocationFromPanel(document);
+            if (domLocation && hasRealLocation(domLocation)) {
               log('✓ Ubicación extraída del DOM para:', device.name, domLocation);
               // Guardar en networkData para que notifyDashboard la encuentre
               const existing = networkData.find(d =>
@@ -351,6 +422,12 @@
                 existing.location = domLocation;
               } else {
                 networkData.push({ name: device.name, location: domLocation, source: 'dom-panel' });
+              }
+              // Actualizar en stableDeviceCache directamente
+              const ck = normalizeName(device.name);
+              const cp = stableDeviceCache.get(ck);
+              if (cp && !hasRealLocation(cp.location)) {
+                stableDeviceCache.set(ck, { ...cp, location: domLocation });
               }
               locationCaptured = true;
             } else {
@@ -911,11 +988,10 @@
 
     // 0b) Buscar en el DOM un atributo `position="lat,lng"` (Google Maps Web Components)
     try {
-      const COORD_RE = /^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/;
       const posEls = searchRoot.querySelectorAll('[position]');
       for (const pel of posEls) {
         const pv = (pel.getAttribute('position') || '').trim();
-        const pm = pv.match(COORD_RE);
+        const pm = pv.match(COORD_ATTR_RE);
         if (pm) {
           const lat = parseFloat(pm[1]);
           const lng = parseFloat(pm[2]);
@@ -930,7 +1006,7 @@
         const allPosEls = document.querySelectorAll('[position]');
         for (const pel of allPosEls) {
           const pv = (pel.getAttribute('position') || '').trim();
-          const pm = pv.match(COORD_RE);
+          const pm = pv.match(COORD_ATTR_RE);
           if (pm) {
             const lat = parseFloat(pm[1]);
             const lng = parseFloat(pm[2]);
@@ -1523,12 +1599,11 @@
     const candidates = document.querySelectorAll('[position]');
     if (candidates.length === 0) return devices;
 
-    const COORD_RE = /^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/;
     const BATTERY_RE = /(\d{1,3})\s*%/;
 
     candidates.forEach((el, idx) => {
       const posVal = (el.getAttribute('position') || '').trim();
-      const match = posVal.match(COORD_RE);
+      const match = posVal.match(COORD_ATTR_RE);
       if (!match) return;
 
       const lat = parseFloat(match[1]);
@@ -1541,21 +1616,23 @@
       // Intentar extraer el nombre del dispositivo desde el elemento o sus
       // padres / hermanos más cercanos.
       let name = null;
-      // 1) aria-label, title, data-name del propio elemento
+      // 1) aria-label, title, data-name, data-device-name, label del propio elemento
       name =
         el.getAttribute('aria-label') ||
         el.getAttribute('title') ||
         el.getAttribute('data-name') ||
+        el.getAttribute('data-device-name') ||
+        el.getAttribute('label') ||
         el.getAttribute('alt') ||
         null;
-      // 2) Si no, buscar en los hijos del elemento
+      // 2) Si no, buscar en los hijos del elemento (light DOM)
       if (!name) {
-        const textChild = el.querySelector('[aria-label], [title], .device-name, h1, h2, h3, strong');
+        const textChild = el.querySelector('[aria-label], [title], .device-name, h1, h2, h3, strong, span, div');
         if (textChild) {
           name = textChild.getAttribute('aria-label') || textChild.getAttribute('title') || textChild.textContent?.trim() || null;
         }
       }
-      // 3) Si aún no, ir al padre y buscar texto que parezca nombre de dispositivo
+      // 3) Si aún no, ir al padre y buscar texto/atributo que parezca nombre de dispositivo
       if (!name) {
         let ancestor = el.parentElement;
         let levels = 0;
@@ -1567,6 +1644,14 @@
           }
           ancestor = ancestor.parentElement;
           levels++;
+        }
+      }
+      // 4) Último recurso: texto visible del propio elemento (p.ej. burbuja del marcador con nombre del dispositivo)
+      if (!name) {
+        const ownText = (el.textContent || '').trim();
+        // Solo aceptar si tiene entre 2 y 80 caracteres y contiene al menos una letra (cualquier script)
+        if (ownText.length >= 2 && ownText.length <= 80 && /\p{L}/u.test(ownText)) {
+          name = ownText;
         }
       }
       // Limpiar el nombre
@@ -1928,8 +2013,41 @@
   // Observador de mutaciones para detectar cambios en el DOM.
   // Solo tiene sentido en la página de Find My Device.
   const observer = new MutationObserver((mutations) => {
+    // Procesar cambios en atributo `position` inmediatamente para capturar coordenadas.
+    // Cuando un marcador aparece o cambia posición, intentamos asociarlo al dispositivo
+    // actualmente seleccionado en el panel de detalles.
+    for (const mutation of mutations) {
+      if (mutation.type === 'attributes' && mutation.attributeName === 'position') {
+        const el = mutation.target;
+        const pv = (el.getAttribute('position') || '').trim();
+        const m = pv.match(COORD_ATTR_RE);
+        if (!m) continue;
+        const lat = parseFloat(m[1]);
+        const lng = parseFloat(m[2]);
+        if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) continue;
+        const location = { lat, lng, address: null };
+
+        // Intentar identificar qué dispositivo está seleccionado en el panel de detalles
+        const detailHeading = document.querySelector(
+          '[role="complementary"] h1, [role="complementary"] h2, [role="complementary"] [role="heading"], ' +
+          'aside h1, aside h2, .detail-panel h1, .detail-panel h2'
+        );
+        if (detailHeading) {
+          const selectedName = (detailHeading.textContent || '').trim();
+          if (selectedName.length >= 2) {
+            const cacheKey = normalizeName(selectedName);
+            const cached = stableDeviceCache.get(cacheKey);
+            if (cached && !hasRealLocation(cached.location)) {
+              stableDeviceCache.set(cacheKey, { ...cached, location });
+              log('[mutation] Posición asignada a dispositivo seleccionado:', selectedName, '→', lat, lng);
+            }
+          }
+        }
+      }
+    }
+
     if (isMonitoring) {
-      // Debounce
+      // Debounce para notificar al dashboard
       clearTimeout(observer._timeout);
       observer._timeout = setTimeout(() => {
         notifyDashboard();
