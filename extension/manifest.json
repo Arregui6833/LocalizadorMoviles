@@ -28,7 +28,7 @@
         "*://findmydevice.google.com/*",
         "*://android.google.com/find*"
       ],
-      "js": ["visibility-override.js"],
+      "js": ["visibility-override.js", "network-interceptor.js"],
       "run_at": "document_start",
       "world": "MAIN"
     },

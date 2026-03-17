@@ -1522,56 +1522,26 @@
     }
   }
 
-  // Interceptar XHR
-  const originalXHR = window.XMLHttpRequest;
-  window.XMLHttpRequest = function() {
-    const xhr = new originalXHR();
-    const originalOpen = xhr.open;
-    
-    xhr.open = function(method, url) {
-      xhr._url = url;
-      return originalOpen.apply(this, arguments);
-    };
-    
-    xhr.addEventListener('load', function() {
-      if (!shouldInterceptUrl(xhr._url)) return;
-      try {
-        // Eliminar prefijo anti-XSSI de Google (")]}'\n")
-        let text = xhr.responseText;
-        if (text && text.startsWith(')]}')) {
-          text = text.substring(text.indexOf('\n') + 1);
-        }
-        const data = JSON.parse(text);
-        processNetworkData(data);
-      } catch (e) {
-        // No es JSON válido
+  // ── MAIN-world network interception → ISOLATED-world data bridge ──────────
+  // The real fetch/XHR interception runs in the MAIN world (network-interceptor.js)
+  // because Chrome MV3's isolated world cannot intercept the page's own network
+  // calls.  That MAIN-world script dispatches CustomEvents on document, which we
+  // receive here and feed into the existing processNetworkData / mapMarkers pipeline.
+  document.addEventListener('dtNetData', function (event) {
+    if (!isFindMyDevicePage()) return;
+    const detail = event.detail;
+    if (!detail) return;
+    if (detail.type === 'network' && detail.data) {
+      processNetworkData(detail.data);
+    } else if (detail.type === 'marker') {
+      const lat = detail.lat;
+      const lng = detail.lng;
+      if (lat != null && lng != null) {
+        mapMarkers.push({ lat: lat, lng: lng, title: detail.title || null });
+        log('Marcador de mapa recibido del interceptor MAIN:', lat, lng);
       }
-    });
-    
-    return xhr;
-  };
-
-  // Interceptar Fetch
-  const originalFetch = window.fetch;
-  window.fetch = function(url, options) {
-    return originalFetch.apply(this, arguments).then(response => {
-      if (!shouldInterceptUrl(url)) return response;
-      response.clone().text().then(text => {
-        try {
-          // Eliminar prefijo anti-XSSI de Google
-          let t = text;
-          if (t && t.startsWith(')]}')) {
-            t = t.substring(t.indexOf('\n') + 1);
-          }
-          const data = JSON.parse(t);
-          processNetworkData(data);
-        } catch (e) {
-          // No es JSON válido
-        }
-      }).catch(() => {});
-      return response;
-    });
-  };
+    }
+  });
 
   // Procesar datos de red
   function processNetworkData(data) {
@@ -2120,8 +2090,8 @@
 
       // FORCE_REFRESH: background service worker triggers this periodically so the
       // content script pushes fresh device data even when the tab is in the background.
-      // chrome.runtime.onMessage callbacks are NOT throttled like setInterval, so this
-      // runs at full frequency even in a hidden tab.
+      // chrome.runtime.onMessage callbacks are not subject to the same 1-minute timer
+      // throttling that setInterval faces in hidden tabs, so they fire more reliably.
       if (message.type === 'FORCE_REFRESH') {
         if (isFindMyDevicePage()) {
           extractDevices().then(devices => {
