@@ -838,6 +838,17 @@
       .trim();
   }
 
+  // Prefijo que Google Find My Device pone en el aria-label de los marcadores del mapa:
+  // p.ej. aria-label="Ubicación de Honor Pad 10"  → nombre real = "Honor Pad 10"
+  // Quitar este prefijo evita que se cree un dispositivo falso "Ubicación de X".
+  const LOCATION_LABEL_PREFIX_RE =
+    /^(?:ubicaci[oó]n\s+de\s+|localizaci[oó]n\s+de\s+|posici[oó]n\s+de\s+|location\s+of\s+|location:\s*|position\s+of\s+)/i;
+
+  function stripLocationLabelPrefix(name) {
+    if (!name) return name;
+    return name.replace(LOCATION_LABEL_PREFIX_RE, '').trim();
+  }
+
   // Regex combinada de etiquetas de botones de acción y opciones de menú de Google Find My Device.
   // Estos elementos siempre generarían falsos positivos como nombres de dispositivos.
   const ACTION_BUTTON_RE =
@@ -928,7 +939,8 @@
       // (p.ej. "Galaxy S25Visto por última vez: hace 2 minutos" → "Galaxy S25")
       const cleaned = cleanElementText(el);
       if (!cleaned) return;
-      const name = trimDeviceName(cleaned);
+      // Quitar prefijos de etiqueta de ubicación (p.ej. "Ubicación de Galaxy S25" → "Galaxy S25")
+      let name = stripLocationLabelPrefix(trimDeviceName(cleaned));
       if (!name || name.length < 2 || name.length > 120) return;
 
       // Omitir si después de limpiar es un texto de acción o menú
@@ -1036,7 +1048,9 @@
     detailPanels.forEach(panel => {
       const heading = panel.querySelector('h1, h2, h3, [role="heading"]');
       if (heading) {
-        const name = heading.textContent?.trim();
+        // Quitar prefijos de etiqueta de ubicación (p.ej. "Ubicación de Honor Pad 10" → "Honor Pad 10")
+        const rawHeading = heading.textContent?.trim() || '';
+        const name = stripLocationLabelPrefix(rawHeading);
         if (name && name.length > 1) {
           devices.push({
             id: generateStableId('panel', name),
@@ -1802,9 +1816,10 @@
           name = ownText;
         }
       }
-      // Limpiar el nombre
+      // Limpiar el nombre y quitar prefijo de etiqueta de ubicación.
+      // Ejemplo: aria-label="Ubicación de Honor Pad 10" → name = "Honor Pad 10"
       if (name) {
-        name = trimDeviceName(name);
+        name = stripLocationLabelPrefix(trimDeviceName(name));
       }
 
       // Extraer batería desde el elemento hacia arriba
@@ -2181,7 +2196,9 @@
           'aside h1, aside h2, .detail-panel h1, .detail-panel h2'
         );
         if (detailHeading) {
-          const selectedName = (detailHeading.textContent || '').trim();
+          // Quitar prefijo de etiqueta de ubicación para identificar el dispositivo real.
+          // Ejemplo: heading = "Ubicación de Honor Pad 10" → selectedName = "Honor Pad 10"
+          const selectedName = stripLocationLabelPrefix((detailHeading.textContent || '').trim());
           if (selectedName.length >= 2) {
             const cacheKey = normalizeName(selectedName);
             const cached = stableDeviceCache.get(cacheKey);

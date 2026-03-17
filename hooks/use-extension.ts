@@ -545,5 +545,43 @@ export function useExtension(extensionId?: string) {
   };
 }
 
-// Hook para datos de demo/prueba
+// Hook para datos de demo/prueba — devuelve dispositivos de ejemplo cuando la extensión
+// no está conectada, para que el dashboard muestre algo útil por defecto.
+export function useDemoDevices(): Device[] {
+  return [
+    {
+      id: "demo-pixel-7a",
+      name: "Pixel 7a",
+      battery: 78,
+      lastSeen: "hace 2 minutos",
+      activity: "Activo ahora",
+      location: { lat: 40.4168, lng: -3.7038, address: "Madrid, España" },
+      isOnline: true,
+      model: "Pixel 7a",
+      extractedAt: new Date().toISOString(),
+    },
+    {
+      id: "demo-galaxy-s23",
+      name: "Galaxy S23",
+      battery: 45,
+      lastSeen: "hace 15 minutos",
+      activity: null,
+      location: { lat: 41.3851, lng: 2.1734, address: "Barcelona, España" },
+      isOnline: true,
+      model: "Samsung Galaxy S23",
+      extractedAt: new Date().toISOString(),
+    },
+    {
+      id: "demo-ipad-pro",
+      name: "iPad Pro",
+      battery: 12,
+      lastSeen: "hace 1 hora",
+      activity: null,
+      location: { lat: 37.3891, lng: -5.9845, address: "Sevilla, España" },
+      isOnline: false,
+      model: "iPad Pro (11-inch)",
+      extractedAt: new Date().toISOString(),
+    },
+  ];
+}
 
