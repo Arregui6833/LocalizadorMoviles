@@ -185,13 +185,27 @@
       if (!cached) {
         stableDeviceCache.set(cacheKey, { ...device });
       } else {
+        // Prefer a location that has real coordinates (lat/lng) over an address-only location.
+        // This prevents a false "address: 'de DeviceName'" from overwriting real coordinates.
+        const newHasCoords = device.location?.lat != null;
+        const cachedHasCoords = cached.location?.lat != null;
+        const mergedLocation = newHasCoords ? device.location
+          : cachedHasCoords ? cached.location
+          : hasRealLocation(device.location) ? device.location
+          : (cached.location || device.location);
+
         stableDeviceCache.set(cacheKey, {
           ...cached,
           ...device,
           id: cached.id, // mantener el ID estable para que el dashboard no lo pierda
-          // Usar la ubicación más concreta disponible: nunca sobreescribir una ubicación real
-          // con un objeto de ubicación vacío {lat: null, lng: null, address: null}.
-          location: hasRealLocation(device.location) ? device.location : (cached.location || device.location),
+          location: mergedLocation,
+          // Protect battery: once a battery value is cached (e.g. from a panel click), don't
+          // overwrite it with a potentially false value from the next text-scan extraction.
+          // simulateUserClicks updates the cache directly so real values still propagate.
+          battery: cached.battery != null ? cached.battery : device.battery,
+          // Prefer existing non-null lastSeen / activity over potentially missing new values.
+          lastSeen: device.lastSeen || cached.lastSeen,
+          activity: device.activity || cached.activity,
         });
       }
     });
@@ -887,7 +901,8 @@
     const batteryPattern = /(\d{1,3})\s*%/;
     const timePattern = /(hace\s+\d+\s+(?:minutos?|horas?|dias?)|\d{1,2}:\d{2}|last\s+seen|ultima\s+vez)/i;
     const statusPattern = /\b(en\s+linea|online|offline|desconectado|conectado|en\s+movimiento)\b/i;
-    const locationPattern = /(?:ubicaci[oó]n|direcci[oó]n|location|address)[:\s]+(.+)/i;
+    // Require ':' after the location keyword so that "Ubicación de Device" doesn't match as an address.
+    const locationPattern = /(?:ubicaci[oó]n|direcci[oó]n|location|address):\s*(.+)/i;
 
     const foundNames = new Set();
 
@@ -1205,8 +1220,9 @@
     }
 
     // 4) Buscar texto que parezca dirección: "Ubicación: ...", "Última ubicación conocida: ...", etc.
+    // Require ':' after the keyword so "Ubicación de DeviceName" doesn't match as a fake address.
     const addressMatch = panelText.match(
-      /(?:(?:[uú]ltima\s+)?(?:ubicaci[oó]n|direcci[oó]n|location|address)(?:\s+conocida)?)[:\s]+(.+)/i
+      /(?:(?:[uú]ltima\s+)?(?:ubicaci[oó]n|direcci[oó]n|location|address)(?:\s+conocida)?):\s*(.+)/i
     );
     if (addressMatch) {
       const address = addressMatch[1].trim();
