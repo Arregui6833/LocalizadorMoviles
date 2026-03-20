@@ -37,6 +37,86 @@ const STORAGE_KEY = "device-tracker:extension-id";
 const EXTENSION_WINDOW_SOURCE = "device-tracker-monitor";
 const WINDOW_MESSAGE_TIMEOUT = 2500;
 
+/**
+ * Normaliza el nombre de un dispositivo para usarlo como clave de deduplicación.
+ * Elimina acentos, puntuación y espacios extra, y lo pone en minúsculas.
+ */
+function normalizeDeviceName(name: string): string {
+  if (!name) return '';
+  return name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Combina la lista existente de dispositivos con la nueva entrante.
+ * - Los dispositivos nuevos se añaden.
+ * - Los existentes se actualizan (batería, lastSeen, actividad, etc.).
+ * - La ubicación NUNCA se pierde: si el nuevo dato no tiene ubicación pero
+ *   el anterior sí, se conserva la ubicación anterior.
+ * - Se usa el nombre normalizado como clave de deduplicación secundaria para
+ *   evitar duplicados cuando el ID del dispositivo cambia entre extracciones
+ *   (p.ej. tras recargar la página o reiniciar el content script).
+ * Esto evita que el dashboard pierda datos entre ciclos de actualización del DOM.
+ */
+function mergeDeviceList(prev: Device[], incoming: Device[]): Device[] {
+  if (!incoming || incoming.length === 0) return prev;
+
+  const result = new Map<string, Device>();
+  // Mapa secundario: nombre normalizado → clave principal en `result`
+  const nameToKey = new Map<string, string>();
+
+  prev.forEach(d => {
+    const key = (d.id && d.id.trim()) ? d.id : normalizeDeviceName(d.name);
+    if (!key) return;
+    result.set(key, d);
+    const nname = normalizeDeviceName(d.name);
+    if (nname) nameToKey.set(nname, key);
+  });
+
+  incoming.forEach(d => {
+    const key = (d.id && d.id.trim()) ? d.id : normalizeDeviceName(d.name);
+    if (!key) return;
+    const nname = normalizeDeviceName(d.name);
+
+    // Buscar primero por clave exacta (ID o nombre)
+    let existing = result.get(key);
+    let useKey = key;
+
+    // Si no se encontró por clave exacta, intentar por nombre normalizado.
+    // Esto cubre el caso donde el ID ha cambiado (nuevo timestamp, reinicio del script).
+    if (!existing && nname) {
+      const prevKey = nameToKey.get(nname);
+      if (prevKey && prevKey !== key) {
+        existing = result.get(prevKey);
+        if (existing) {
+          // Eliminar la entrada antigua y usar la nueva clave
+          result.delete(prevKey);
+          useKey = key;
+        }
+      }
+    }
+
+    if (!existing) {
+      result.set(useKey, d);
+    } else {
+      result.set(useKey, {
+        ...existing,
+        ...d,
+        // nunca sobreescribir una ubicación conocida con null
+        location: d.location ?? existing.location,
+      });
+    }
+    if (nname) nameToKey.set(nname, useKey);
+  });
+
+  return Array.from(result.values());
+}
+
 export function useExtension(extensionId?: string) {
   const [state, setState] = useState<ExtensionState>({
     isConnected: false,
@@ -227,7 +307,7 @@ export function useExtension(extensionId?: string) {
     const setDevicesState = (devices: Device[], lastUpdate?: number) => {
       setState((prev) => ({
         ...prev,
-        devices,
+        devices: mergeDeviceList(prev.devices, devices),
         lastUpdate: lastUpdate || Date.now(),
         error: null,
       }));
@@ -393,7 +473,7 @@ export function useExtension(extensionId?: string) {
     };
   }, [checkConnection, fetchDevices]);
 
-  // Escuchar mensajes de la extension
+  // Escuchar mensajes de la extension via chrome.runtime (funciona en popups/páginas privilegiadas)
   useEffect(() => {
     const runtime = typeof chrome !== "undefined" ? chrome.runtime : undefined;
     const onMessage = runtime?.onMessage;
@@ -408,7 +488,7 @@ export function useExtension(extensionId?: string) {
         if (message.devices) {
           setState((prev) => ({
             ...prev,
-            devices: message.devices!,
+            devices: mergeDeviceList(prev.devices, message.devices!),
             lastUpdate: message.timestamp || Date.now(),
           }));
         }
@@ -422,6 +502,37 @@ export function useExtension(extensionId?: string) {
     };
   }, []);
 
+  // Escuchar actualizaciones push del content script via window.postMessage.
+  // El content script inyectado en el dashboard reenvía los mensajes DEVICES_UPDATE
+  // del background a la página web usando este canal (chrome.runtime no está
+  // disponible directamente en páginas web normales).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handlePushMessage = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== EXTENSION_WINDOW_SOURCE) return;
+      // Ignorar mensajes que son respuestas a solicitudes (tienen requestId)
+      if (data.requestId) return;
+
+      if (data.type === "DEVICES_UPDATE" || data.type === "DEVICES_CHANGED") {
+        if (data.devices) {
+          setState((prev) => ({
+            ...prev,
+            devices: mergeDeviceList(prev.devices, data.devices),
+            lastUpdate: data.timestamp || Date.now(),
+            isConnected: true,
+            isLoading: false,
+          }));
+        }
+      }
+    };
+
+    window.addEventListener("message", handlePushMessage);
+    return () => window.removeEventListener("message", handlePushMessage);
+  }, []); // deps vacío: registrar una vez, la closure usa el setState estable de React
+
   return {
     ...state,
     checkConnection,
@@ -434,50 +545,43 @@ export function useExtension(extensionId?: string) {
   };
 }
 
-// Hook para datos de demo/prueba
+// Hook para datos de demo/prueba — devuelve dispositivos de ejemplo cuando la extensión
+// no está conectada, para que el dashboard muestre algo útil por defecto.
 export function useDemoDevices(): Device[] {
   return [
     {
-      id: "demo-1",
-      name: "Mi Pixel 8 Pro",
+      id: "demo-pixel-7a",
+      name: "Pixel 7a",
       battery: 78,
-      lastSeen: new Date().toISOString(),
-      location: {
-        lat: 40.4168,
-        lng: -3.7038,
-        address: "Puerta del Sol, Madrid",
-      },
+      lastSeen: "hace 2 minutos",
+      activity: "Activo ahora",
+      location: { lat: 40.4168, lng: -3.7038, address: "Madrid, España" },
       isOnline: true,
-      model: "Google Pixel 8 Pro",
+      model: "Pixel 7a",
       extractedAt: new Date().toISOString(),
     },
     {
-      id: "demo-2",
-      name: "Samsung Galaxy S24",
+      id: "demo-galaxy-s23",
+      name: "Galaxy S23",
       battery: 45,
-      lastSeen: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-      location: {
-        lat: 40.4530,
-        lng: -3.6883,
-        address: "Plaza de Castilla, Madrid",
-      },
+      lastSeen: "hace 15 minutos",
+      activity: null,
+      location: { lat: 41.3851, lng: 2.1734, address: "Barcelona, España" },
       isOnline: true,
-      model: "Samsung Galaxy S24",
+      model: "Samsung Galaxy S23",
       extractedAt: new Date().toISOString(),
     },
     {
-      id: "demo-3",
-      name: "Tablet Samsung",
+      id: "demo-ipad-pro",
+      name: "iPad Pro",
       battery: 12,
-      lastSeen: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
-      location: {
-        lat: 40.4200,
-        lng: -3.6880,
-        address: "Parque del Retiro, Madrid",
-      },
+      lastSeen: "hace 1 hora",
+      activity: null,
+      location: { lat: 37.3891, lng: -5.9845, address: "Sevilla, España" },
       isOnline: false,
-      model: "Samsung Galaxy Tab S9",
+      model: "iPad Pro (11-inch)",
       extractedAt: new Date().toISOString(),
     },
   ];
 }
+

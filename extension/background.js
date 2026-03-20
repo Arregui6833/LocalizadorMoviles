@@ -8,6 +8,47 @@ const EXTENSION_STATE = {
   dashboardTabId: null
 };
 
+// ─── Keep the service worker alive via open ports ───────────────────────────
+// When the FMD content script connects with name 'keepAlivePort', we keep the
+// SW alive and run our own fast refresh loop (service workers are not subject
+// to the same timer throttling as background tab content scripts).
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'keepAlivePort') return;
+
+  console.log('[Background] keepAlivePort connected');
+
+  // Run a periodic refresh driven by the service worker.
+  // This is more reliable than setInterval inside the content script
+  // because the content script's timers are throttled by Chrome when its
+  // tab is in the background. Messages sent FROM the SW are delivered
+  // immediately even to hidden-tab content scripts.
+  // 15 seconds: short enough to feel responsive when the tab is in background,
+  // long enough not to flood the content script with messages (which must DOM-parse
+  // on each call). chrome.alarms minimum is 1 minute, so this SW-driven interval
+  // is the highest-frequency refresh mechanism available for background tabs.
+  const REFRESH_INTERVAL_MS = 15000; // 15 seconds
+  let refreshTimer = setInterval(async () => {
+    try {
+      const allTabs = await chrome.tabs.query({});
+      const findTab = allTabs.find(tab => isFindMyDeviceTab(tab.url));
+      if (findTab && findTab.id) {
+        chrome.tabs.sendMessage(findTab.id, { type: 'FORCE_REFRESH' }, () => {
+          if (chrome.runtime.lastError) {} // Tab may not be ready yet — ignore
+        });
+      }
+    } catch (e) {
+      console.error('[Background] SW refresh error:', e);
+    }
+  }, REFRESH_INTERVAL_MS);
+
+  port.onDisconnect.addListener(() => {
+    console.log('[Background] keepAlivePort disconnected');
+    clearInterval(refreshTimer);
+    // When the content script reconnects it will open a new port
+  });
+});
+// ────────────────────────────────────────────────────────────────────────────
+
 // Escuchar mensajes del content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'DEVICES_UPDATE') {
@@ -110,14 +151,63 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return true;
 });
 
+// Detectar si una pestaña es de Find My Device
+function isFindMyDeviceTab(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    const path = parsed.pathname;
+    return (
+      (host === 'www.google.com' && path.includes('/android/find')) ||
+      host === 'findmydevice.google.com' ||
+      (host === 'android.google.com' && path.startsWith('/find'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+// Trigger a FORCE_REFRESH in the FMD tab immediately
+async function forceRefreshFmdTab() {
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const findTab = allTabs.find(tab => isFindMyDeviceTab(tab.url));
+    if (findTab && findTab.id) {
+      chrome.tabs.sendMessage(findTab.id, { type: 'FORCE_REFRESH' }, () => {
+        if (chrome.runtime.lastError) {} // Tab might not have content script yet
+      });
+    }
+  } catch (e) {
+    console.error('[Background] forceRefreshFmdTab error:', e);
+  }
+}
+
+// When the user switches to the FMD tab, immediately pull fresh data
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (isFindMyDeviceTab(tab.url)) {
+      console.log('[Background] FMD tab activated — requesting refresh');
+      forceRefreshFmdTab();
+    }
+  } catch (e) {} // ignore
+});
+
+// When a FMD tab finishes loading, request fresh data
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'complete' && isFindMyDeviceTab(tab.url)) {
+    console.log('[Background] FMD tab loaded — scheduling initial refresh');
+    // Give the content script a moment to initialize before sending the message
+    setTimeout(() => forceRefreshFmdTab(), 5000);
+  }
+});
+
 // Obtener dispositivos del content script
 async function getDevicesFromContentScript() {
-  // Algunas APIs (y patrones de URL) pueden ser sensibles. Para mayor fiabilidad,
-  // consultamos todas las pestañas y buscamos la URL que contenga "/android/find".
+  // Consultar todas las pestañas y buscar Find My Device (URL antigua y nueva).
   const allTabs = await chrome.tabs.query({});
-  const findTab = allTabs.find((tab) => {
-    return tab.url && tab.url.includes('/android/find');
-  });
+  const findTab = allTabs.find((tab) => isFindMyDeviceTab(tab.url));
 
   if (!findTab || !findTab.id) {
     throw new Error('Find My Device not open');
@@ -139,7 +229,7 @@ async function getDevicesFromContentScript() {
 // Iniciar monitoreo en Find My Device
 async function startMonitoringInFindMyDevice(interval = 5000) {
   const allTabs = await chrome.tabs.query({});
-  const findTab = allTabs.find((tab) => tab.url && tab.url.includes('/android/find'));
+  const findTab = allTabs.find((tab) => isFindMyDeviceTab(tab.url));
 
   if (!findTab || !findTab.id) {
     // Abrir Find My Device si no está abierto
@@ -159,7 +249,7 @@ async function startMonitoringInFindMyDevice(interval = 5000) {
 // Detener monitoreo
 async function stopMonitoringInFindMyDevice() {
   const allTabs = await chrome.tabs.query({});
-  const findTabs = allTabs.filter((tab) => tab.url && tab.url.includes('/android/find'));
+  const findTabs = allTabs.filter((tab) => isFindMyDeviceTab(tab.url));
 
   findTabs.forEach((tab) => {
     if (tab.id) {
@@ -204,14 +294,14 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-// Mantener el service worker activo (si está disponible)
-if (chrome.alarms && chrome.alarms.create) {
-  chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
-  chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'keepAlive') {
-      console.log('[Background] Keep alive ping');
-    }
-  });
-} else {
-  console.warn('[Background] chrome.alarms no disponible, no se puede mantener activo el service worker');
-}
+// Alarm: keep the service worker alive and periodically refresh FMD data as a
+// last-resort fallback (e.g. when the FMD tab is open but the keepAlivePort
+// isn't connected).
+chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'keepAlive') {
+    console.log('[Background] Keep alive alarm — triggering FMD refresh');
+    forceRefreshFmdTab();
+  }
+});
+

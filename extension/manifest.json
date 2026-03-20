@@ -12,6 +12,8 @@
   ],
   "host_permissions": [
     "*://*/*android/find*",
+    "*://findmydevice.google.com/*",
+    "*://android.google.com/find*",
     "http://localhost:*/*",
     "http://127.0.0.1:*/*",
     "https://*.vercel.app/*"
@@ -21,7 +23,21 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://*/*android/find*"],
+      "matches": [
+        "*://*/*android/find*",
+        "*://findmydevice.google.com/*",
+        "*://android.google.com/find*"
+      ],
+      "js": ["visibility-override.js", "network-interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://*/*android/find*",
+        "*://findmydevice.google.com/*",
+        "*://android.google.com/find*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     },

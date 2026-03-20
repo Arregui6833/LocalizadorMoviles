@@ -13,6 +13,7 @@ export interface Device {
   name: string;
   battery: number | null;
   lastSeen: string | null;
+  activity?: string | null;
   location: DeviceLocation | null;
   isOnline: boolean;
   model?: string;
@@ -30,6 +31,38 @@ interface ExtensionState {
 
 // ID de la extension - el usuario debe actualizarlo despues de instalar
 const DEFAULT_EXTENSION_ID = "YOUR_EXTENSION_ID_HERE";
+
+// Identificador que el content script incluye en los mensajes postMessage
+const EXTENSION_WINDOW_SOURCE = "device-tracker-monitor";
+
+/**
+ * Combina la lista existente de dispositivos con la nueva entrante.
+ * La ubicación NUNCA se pierde: si el nuevo dato no trae ubicación pero
+ * el anterior sí la tenía, se conserva la anterior.
+ */
+function mergeDeviceList(prev: Device[], incoming: Device[]): Device[] {
+  if (!incoming || incoming.length === 0) return prev;
+  const result = new Map<string, Device>();
+  prev.forEach(d => {
+    const key = d.id || (d.name || '').toLowerCase().trim();
+    if (key) result.set(key, d);
+  });
+  incoming.forEach(d => {
+    const key = d.id || (d.name || '').toLowerCase().trim();
+    if (!key) return;
+    const existing = result.get(key);
+    if (!existing) {
+      result.set(key, d);
+    } else {
+      result.set(key, {
+        ...existing,
+        ...d,
+        location: d.location ?? existing.location,
+      });
+    }
+  });
+  return Array.from(result.values());
+}
 
 export function useExtension(extensionId?: string) {
   const [state, setState] = useState<ExtensionState>({
@@ -129,7 +162,7 @@ export function useExtension(extensionId?: string) {
               } else if (response && response.devices) {
                 setState((prev) => ({
                   ...prev,
-                  devices: response.devices,
+                  devices: mergeDeviceList(prev.devices, response.devices),
                   lastUpdate: response.lastUpdate || Date.now(),
                   error: null,
                 }));
@@ -221,7 +254,7 @@ export function useExtension(extensionId?: string) {
     checkConnection();
   }, [checkConnection]);
 
-  // Escuchar mensajes de la extension
+  // Escuchar mensajes de la extension via chrome.runtime (funciona en popups/páginas privilegiadas)
   useEffect(() => {
     if (typeof chrome === "undefined" || !chrome.runtime) return;
 
@@ -234,7 +267,7 @@ export function useExtension(extensionId?: string) {
         if (message.devices) {
           setState((prev) => ({
             ...prev,
-            devices: message.devices!,
+            devices: mergeDeviceList(prev.devices, message.devices!),
             lastUpdate: message.timestamp || Date.now(),
           }));
         }
@@ -247,6 +280,37 @@ export function useExtension(extensionId?: string) {
       chrome.runtime.onMessage.removeListener(handleMessage);
     };
   }, []);
+
+  // Escuchar actualizaciones push del content script via window.postMessage.
+  // El content script inyectado en el dashboard reenvía los mensajes DEVICES_UPDATE
+  // del background a la página web usando este canal (chrome.runtime no está
+  // disponible directamente en páginas web normales).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handlePushMessage = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      const data = event.data;
+      if (!data || data.source !== EXTENSION_WINDOW_SOURCE) return;
+      // Ignorar mensajes que son respuestas a solicitudes (tienen requestId)
+      if (data.requestId) return;
+
+      if (data.type === "DEVICES_UPDATE" || data.type === "DEVICES_CHANGED") {
+        if (data.devices) {
+          setState((prev) => ({
+            ...prev,
+            devices: mergeDeviceList(prev.devices, data.devices),
+            lastUpdate: data.timestamp || Date.now(),
+            isConnected: true,
+            isLoading: false,
+          }));
+        }
+      }
+    };
+
+    window.addEventListener("message", handlePushMessage);
+    return () => window.removeEventListener("message", handlePushMessage);
+  }, []); // deps vacío: registrar una vez, la closure usa el setState estable de React
 
   return {
     ...state,
