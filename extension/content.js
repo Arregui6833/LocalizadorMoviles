@@ -356,6 +356,8 @@
             if (COORD_ATTR_RE.test(pv)) positionsBefore.set(el, pv);
           });
 
+          // Record the time of the click so we can correlate with network responses.
+          const clickTime = Date.now();
           clickElement(clickable);
 
           log('✓ Click enviado, esperando carga de detalles...');
@@ -552,6 +554,41 @@
               locationCaptured = true;
             } else {
               log('⚠ Ubicación no disponible en DOM para:', device.name);
+            }
+          }
+
+          // ── PASO D.2: Fallback de coordenadas de red (raw JSON scan) ────────────
+          // When the DOM [position] approach and the named-device network lookup both fail
+          // (common in background tabs where Google Maps doesn't render markers),
+          // use the most recently captured coordinate that arrived AFTER this device's click.
+          // Because simulateUserClicks processes one device at a time (guarded by
+          // isClickingDevices), any coordinate received in this window almost certainly
+          // belongs to the API response triggered by our click on this device.
+          if (!locationCaptured) {
+            const freshCoords = lastNetworkCoords.filter(c => c.timestamp > clickTime);
+            if (freshCoords.length > 0) {
+              // Use the most recent coordinate in the window
+              const fc = freshCoords[freshCoords.length - 1];
+              const rawNetLocation = { lat: fc.lat, lng: fc.lng, address: null };
+              log('[rawNet] Usando coordenada de red para:', device.name, fc.lat, fc.lng);
+              // Save to cache and networkData
+              const cacheKey2 = normalizeName(device.name);
+              const cached2 = stableDeviceCache.get(cacheKey2);
+              if (cached2 && !hasRealLocation(cached2.location)) {
+                stableDeviceCache.set(cacheKey2, { ...cached2, location: rawNetLocation });
+              }
+              const existingNet2 = networkData.find(d =>
+                (d.name || '').toLowerCase() === deviceName ||
+                (d.name || '').toLowerCase().includes(deviceName.split(' ')[0])
+              );
+              if (existingNet2) {
+                existingNet2.location = rawNetLocation;
+              } else {
+                networkData.push({ name: device.name, location: rawNetLocation, source: 'raw-net-coords' });
+              }
+              locationCaptured = true;
+            } else {
+              log('⚠ Sin coordenadas de red frescas para:', device.name);
             }
           }
 
@@ -1493,6 +1530,11 @@
   // Interceptar datos de red (XHR/Fetch)
   let networkData = [];
 
+  // Coordinate pairs extracted from raw API response text (used as a last-resort
+  // fallback when findDevicesInObject can't parse Google's protobuf-JSON arrays).
+  // Each entry: { lat, lng, timestamp }
+  let lastNetworkCoords = [];
+
   // Cache estable de dispositivos — preserva dispositivos y ubicaciones entre
   // actualizaciones del DOM (la SPA de Google FMD re-renderiza constantemente).
   // Solo los dispositivos con nombre válido (>1 char) entran en la caché.
@@ -1532,7 +1574,7 @@
     const detail = event.detail;
     if (!detail) return;
     if (detail.type === 'network' && detail.data) {
-      processNetworkData(detail.data);
+      processNetworkData(detail.data, detail.rawText || null);
     } else if (detail.type === 'marker') {
       const lat = detail.lat;
       const lng = detail.lng;
@@ -1543,8 +1585,37 @@
     }
   });
 
+  // Extract lat/lng coordinate pairs from a raw JSON string using regex.
+  // Google FMD's protobuf-JSON responses encode coordinates as bare numbers
+  // in nested arrays, so field-name-based parsing (findDevicesInObject) misses them.
+  // This regex finds any two adjacent floating-point numbers where the first is in
+  // the lat range [-90, 90] and the second in the lng range [-180, 180].
+  // Results are intentionally conservative (≥5 decimal places) to avoid false positives.
+  function extractCoordsFromRawJson(text) {
+    if (!text || typeof text !== 'string') return [];
+    const results = [];
+    // Match: <lat_number> <JSON separator(s)> <lng_number>
+    // Requires ≥5 decimal places so we don't match short integers like version numbers.
+    // Separator is limited to JSON array/object delimiters and whitespace to reduce
+    // false positives from unrelated adjacent numbers in the response body.
+    const re = /(-?\d{1,2}\.\d{5,})[\s,\[\]{}"':]{1,8}(-?\d{1,3}\.\d{5,})/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const lat = parseFloat(m[1]);
+      const lng = parseFloat(m[2]);
+      if (
+        lat >= -90 && lat <= 90 &&
+        lng >= -180 && lng <= 180 &&
+        !(Math.abs(lat) < 0.0001 && Math.abs(lng) < 0.0001) // skip null-island
+      ) {
+        results.push({ lat, lng });
+      }
+    }
+    return results;
+  }
+
   // Procesar datos de red
-  function processNetworkData(data) {
+  function processNetworkData(data, rawText) {
     if (!data) return;
     
     log('Procesando datos de red...');
@@ -1586,6 +1657,24 @@
       if (hasNewLocationData) {
         log('Datos de ubicación nuevos detectados, notificando dashboard...');
         notifyDashboard();
+      }
+    }
+
+    // ── Raw-text coordinate extraction ───────────────────────────────────────
+    // Google FMD's protobuf-JSON responses store coordinates as bare numbers in
+    // nested arrays (no named fields), so findDevicesInObject misses them.
+    // We scan the raw text for any number-pair that looks like lat/lng and store
+    // it in lastNetworkCoords so simulateUserClicks can use it as a fallback.
+    if (rawText) {
+      const coords = extractCoordsFromRawJson(rawText);
+      if (coords.length > 0) {
+        const now = Date.now();
+        coords.forEach(c => lastNetworkCoords.push({ lat: c.lat, lng: c.lng, timestamp: now }));
+        // Keep only the most recent 30 entries to limit memory usage
+        if (lastNetworkCoords.length > 30) {
+          lastNetworkCoords = lastNetworkCoords.slice(-30);
+        }
+        log('[rawNet] Coordenadas extraídas del texto de red:', coords.length, coords[0]);
       }
     }
   }

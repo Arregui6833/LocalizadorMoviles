@@ -39,10 +39,16 @@
   }
 
   // ── Emit captured data to the isolated content script ───────────────────
-  function emitNetworkData(rawJson) {
+  // rawJson  — the parsed JavaScript object/array from the API response.
+  // rawText  — the original response text (before JSON.parse) so the
+  //            isolated-world side can scan it for coordinate pairs using
+  //            regex even when the parsed structure doesn't match known field names.
+  function emitNetworkData(rawJson, rawText) {
     try {
       document.dispatchEvent(
-        new CustomEvent(EVENT_NAME, { detail: { type: 'network', data: rawJson } })
+        new CustomEvent(EVENT_NAME, {
+          detail: { type: 'network', data: rawJson, rawText: rawText || null },
+        })
       );
     } catch (e) {
       // Ignore dispatch errors
@@ -84,7 +90,7 @@
     result.then(function (response) {
       response.clone().text().then(function (text) {
         const data = parseGoogleResponse(text);
-        if (data) emitNetworkData(data);
+        if (data) emitNetworkData(data, text);
       }).catch(function () {});
     }).catch(function () {});
 
@@ -106,7 +112,7 @@
     xhr.addEventListener('load', function () {
       if (!shouldIntercept(_interceptUrl)) return;
       const data = parseGoogleResponse(xhr.responseText);
-      if (data) emitNetworkData(data);
+      if (data) emitNetworkData(data, xhr.responseText);
     });
 
     return xhr;

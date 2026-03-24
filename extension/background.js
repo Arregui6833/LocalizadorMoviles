@@ -214,8 +214,13 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }, TAB_REMOVAL_DEBOUNCE_MS);
 });
 
-// Inicializar estado desde storage (cubre tanto onStartup como reinicios del SW)
+// Inicializar estado desde storage (cubre tanto onStartup como reinicios del SW).
+// A guard flag prevents duplicate initialization if both onStartup and the
+// module-level call fire close together (e.g. after a SW restart).
+let _stateInitialized = false;
 function initStateFromStorage() {
+  if (_stateInitialized) return;
+  _stateInitialized = true;
   chrome.storage.local.get(['backgroundMonitoring'], (result) => {
     if (result.backgroundMonitoring) {
       console.log('[Background] Restaurando monitoreo en segundo plano');
