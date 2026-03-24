@@ -125,6 +125,41 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  const bgMonitorBtn = document.getElementById('bgMonitorBtn');
+  const bgMonitorLabel = document.getElementById('bgMonitorLabel');
+  const bgMonitorDot = document.getElementById('bgMonitorDot');
+
+  // Cargar y mostrar estado del monitoreo en segundo plano
+  function loadBgMonitorState() {
+    chrome.storage.local.get(['backgroundMonitoring'], (result) => {
+      updateBgMonitorUI(!!result.backgroundMonitoring);
+    });
+  }
+
+  function updateBgMonitorUI(active) {
+    if (active) {
+      bgMonitorBtn.classList.add('active');
+      bgMonitorLabel.textContent = 'Segundo plano: ACTIVO';
+    } else {
+      bgMonitorBtn.classList.remove('active');
+      bgMonitorLabel.textContent = 'Monitoreo en segundo plano';
+    }
+  }
+
+  bgMonitorBtn?.addEventListener('click', () => {
+    chrome.storage.local.get(['backgroundMonitoring'], (result) => {
+      const newState = !result.backgroundMonitoring;
+      chrome.runtime.sendMessage({ type: 'SET_BACKGROUND_MONITORING', enable: newState }, (response) => {
+        // Update UI only when background confirms the state change
+        if (response && (response.status === 'enabled' || response.status === 'disabled')) {
+          updateBgMonitorUI(newState);
+        }
+      });
+    });
+  });
+
+  loadBgMonitorState();
+
   // Event listeners
   openFindMyDeviceBtn?.addEventListener('click', openFindMyDevice);
   refreshBtn?.addEventListener('click', loadDevices);
@@ -134,6 +169,9 @@ document.addEventListener('DOMContentLoaded', () => {
   chrome.storage.onChanged.addListener((changes) => {
     if (changes.devices) {
       loadDevices();
+    }
+    if (changes.backgroundMonitoring) {
+      updateBgMonitorUI(!!changes.backgroundMonitoring.newValue);
     }
   });
 

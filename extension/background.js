@@ -5,7 +5,8 @@ const EXTENSION_STATE = {
   devices: [],
   lastUpdate: null,
   isConnected: false,
-  dashboardTabId: null
+  dashboardTabId: null,
+  backgroundMonitoring: false
 };
 
 // ─── Keep the service worker alive via open ports ───────────────────────────
@@ -49,7 +50,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 // ────────────────────────────────────────────────────────────────────────────
 
-// Escuchar mensajes del content script
+// Escuchar mensajes del content script y del popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'DEVICES_UPDATE') {
     EXTENSION_STATE.devices = message.devices;
@@ -70,6 +71,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'DEVICES_CHANGED') {
     EXTENSION_STATE.devices = message.devices;
     notifyDashboard(message);
+  }
+
+  if (message.type === 'SET_BACKGROUND_MONITORING') {
+    const enable = !!message.enable;
+    EXTENSION_STATE.backgroundMonitoring = enable;
+    chrome.storage.local.set({ backgroundMonitoring: enable });
+
+    if (enable) {
+      // Abrir pestaña de FMD en segundo plano si no hay ninguna abierta
+      ensureFmdTabOpen();
+    }
+
+    sendResponse({ status: enable ? 'enabled' : 'disabled' });
+    return true;
   }
   
   return true;
@@ -151,7 +166,59 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return true;
 });
 
-// Detectar si una pestaña es de Find My Device
+// Abrir pestaña de FMD en segundo plano si no hay ninguna ya abierta
+async function ensureFmdTabOpen() {
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const hasFmdTab = allTabs.some(tab => isFindMyDeviceTab(tab.url));
+    if (!hasFmdTab) {
+      console.log('[Background] Abriendo pestaña de FMD en segundo plano para monitoreo');
+      chrome.tabs.create({
+        url: 'https://www.google.com/android/find',
+        active: false
+      });
+    }
+  } catch (e) {
+    console.error('[Background] ensureFmdTabOpen error:', e);
+  }
+}
+
+// Delay (ms) to wait after a tab is removed before querying remaining tabs.
+// Chrome removes the tab from the list asynchronously, so a brief pause
+// ensures our query sees the correct post-removal state.
+const TAB_REMOVAL_DEBOUNCE_MS = 500;
+
+// Cuando se cierra una pestaña: si era la pestaña de FMD y el monitoreo en
+// segundo plano está activo, reabrirla automáticamente de forma oculta.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!EXTENSION_STATE.backgroundMonitoring) return;
+  // Pequeña espera para que la pestaña sea eliminada del listado antes de consultar
+  setTimeout(() => {
+    chrome.tabs.query({}, (allTabs) => {
+      const hasFmdTab = allTabs.some(tab => isFindMyDeviceTab(tab.url));
+      if (!hasFmdTab) {
+        console.log('[Background] Pestaña FMD cerrada con monitoreo activo — reabriendo en segundo plano');
+        chrome.tabs.create({
+          url: 'https://www.google.com/android/find',
+          active: false
+        });
+      }
+    });
+  }, TAB_REMOVAL_DEBOUNCE_MS);
+});
+
+// Al arrancar el navegador: restaurar el monitoreo en segundo plano si estaba activo
+chrome.runtime.onStartup.addListener(() => {
+  chrome.storage.local.get(['backgroundMonitoring'], (result) => {
+    if (result.backgroundMonitoring) {
+      console.log('[Background] Restaurando monitoreo en segundo plano tras inicio del navegador');
+      EXTENSION_STATE.backgroundMonitoring = true;
+      ensureFmdTabOpen();
+    }
+  });
+});
+
+
 function isFindMyDeviceTab(url) {
   if (!url) return false;
   try {
@@ -287,6 +354,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.set({
     devices: [],
     lastUpdate: null,
+    backgroundMonitoring: false,
     settings: {
       autoMonitor: true,
       interval: 5000

@@ -141,6 +141,43 @@
       background: #404040;
     }
     
+    .btn-toggle {
+      background: #262626;
+      color: #a3a3a3;
+      border: 1px solid #404040;
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    
+    .btn-toggle.active {
+      background: #14532d;
+      color: #86efac;
+      border-color: #166534;
+    }
+    
+    .btn-toggle:hover {
+      background: #404040;
+    }
+    
+    .btn-toggle.active:hover {
+      background: #166534;
+    }
+
+    .toggle-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #a3a3a3;
+      flex-shrink: 0;
+    }
+
+    .btn-toggle.active .toggle-dot {
+      background: #22c55e;
+    }
+
     .footer {
       padding: 12px 16px;
       border-top: 1px solid #262626;
@@ -172,6 +209,12 @@
     </div>
     <div id="analysisResult" style="display:none; margin-top: 12px; padding: 12px; background: #171717; border-radius: 8px; font-size: 11px; max-height: 200px; overflow-y: auto;">
       <pre id="analysisText" style="white-space: pre-wrap; word-break: break-all;"></pre>
+    </div>
+    <div style="margin-top: 12px;">
+      <button class="btn btn-toggle" id="bgMonitorBtn">
+        <span id="bgMonitorLabel">Monitoreo en segundo plano</span>
+        <span class="toggle-dot" id="bgMonitorDot"></span>
+      </button>
     </div>
   </div>
   
