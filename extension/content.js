@@ -292,6 +292,32 @@
     isClickingDevices = true;
     log('Iniciando simulación de clics en', devices.length, 'dispositivos');
 
+    // ── Pre-click: try to assign locations from stored API text ─────────────
+    // The FMD API response often arrives BEFORE extractDevices() populates
+    // stableDeviceCache.  parseFmdArrayFormat may have added entries to networkData
+    // but could not update the cache because the device wasn't there yet.
+    // Now that we know the device names (from the devices list), do a second pass
+    // to fill in any remaining missing locations from the stored raw text.
+    if (lastRawApiText) {
+      const preAssigned = parseFmdArrayFormat(lastRawApiText);
+      preAssigned.forEach(d => {
+        const normKey = normalizeName(d.name);
+        // Update stableDeviceCache
+        const cached = stableDeviceCache.get(normKey);
+        if (cached && !hasRealLocation(cached.location)) {
+          stableDeviceCache.set(normKey, { ...cached, location: d.location });
+          log('[pre-click] Ubicación pre-asignada:', d.name, d.location);
+        }
+        // Update networkData
+        const existingNet = networkData.find(nd => normalizeName(nd.name) === normKey);
+        if (existingNet && !hasRealLocation(existingNet.location)) {
+          existingNet.location = d.location;
+        } else if (!existingNet) {
+          networkData.push({ ...d });
+        }
+      });
+    }
+
     try {
       for (let i = 0; i < devices.length; i++) {
         const device = devices[i];
@@ -1576,6 +1602,11 @@
   // Each entry: { lat, lng, timestamp }
   let lastNetworkCoords = [];
 
+  // Latest raw FMD API response text — stored so we can re-process it after the
+  // DOM device names become known (the API response often arrives before extractDevices
+  // runs at the 4-second mark, when stableDeviceCache is still empty).
+  let lastRawApiText = null;
+
   // Cache estable de dispositivos — preserva dispositivos y ubicaciones entre
   // actualizaciones del DOM (la SPA de Google FMD re-renderiza constantemente).
   // Solo los dispositivos con nombre válido (>1 char) entran en la caché.
@@ -1663,9 +1694,64 @@
     return results;
   }
 
+  // Parse FMD's protobuf-JSON array format to extract (device name, lat, lng) pairs.
+  //
+  // Google FMD's API responses encode device data as nested positional arrays without
+  // named fields, so findDevicesInObject (which looks for keys like "name", "lat" etc.)
+  // extracts nothing from them.  This function takes a different approach: it scans the
+  // raw response text for JSON string literals that look like device brand names, then
+  // searches the text window immediately following each name for coordinate pairs.
+  //
+  // This exploits the fact that FMD groups a device's name and coordinates together in
+  // the same sub-array, so they appear in close proximity in the serialized text.
+  function parseFmdArrayFormat(rawText) {
+    if (!rawText || typeof rawText !== 'string') return [];
+    const results = [];
+    const seen = new Set();
+
+    // Regex to find JSON string values (quoted, no backslash escapes, length 2–80)
+    const stringRe = /"([^"\\]{2,80})"/g;
+    // Device brand / model name pattern (same as used elsewhere in the extension)
+    const deviceNameRE = /pixel|samsung|galaxy|iphone|xiaomi|redmi|oneplus|huawei|oppo|motorola|nokia|sony|asus|realme|vivo|poco|tablet|watch|honor|nothing|lg|ipad/i;
+
+    let m;
+    while ((m = stringRe.exec(rawText)) !== null) {
+      const candidate = m[1];
+      // Must look like a device brand/model name
+      if (!deviceNameRE.test(candidate)) continue;
+      // Reject strings that look like URLs, paths, identifiers or JSON keys
+      if (/[/\\<>{}[\]@=+]/.test(candidate)) continue;
+      // Deduplicate by normalized name
+      const normKey = candidate.toLowerCase().trim();
+      if (seen.has(normKey)) continue;
+      seen.add(normKey);
+
+      // Look for coordinate pairs in the 1500 chars immediately after this name.
+      // Using a bounded window prevents associating a name with a different device's
+      // coordinates that appear later in the response.
+      const searchStart = m.index + m[0].length;
+      const windowText = rawText.substring(searchStart, searchStart + 1500);
+      const coords = extractCoordsFromRawJson(windowText);
+      if (coords.length === 0) continue;
+
+      // Clean up the name (remove trailing status text, location label prefixes)
+      const cleanName = trimDeviceName(stripLocationLabelPrefix(candidate)) || candidate;
+      if (!cleanName || cleanName.length < 2 || cleanName.length > 80) continue;
+
+      results.push({
+        id: generateStableId('fmd', cleanName),
+        name: cleanName,
+        location: { lat: coords[0].lat, lng: coords[0].lng, address: null },
+        source: 'fmd-raw',
+        extractedAt: new Date().toISOString(),
+      });
+      log('[fmd-raw] Nombre+coords extraídos del texto bruto:', cleanName, '→', coords[0].lat, coords[0].lng);
+    }
+    return results;
+  }
+
   // Procesar datos de red
-  function processNetworkData(data, rawText) {
-    if (!data) return;
+  function processNetworkData(data, rawText) {    if (!data) return;
     
     log('Procesando datos de red...');
     
@@ -1724,6 +1810,42 @@
           lastNetworkCoords = lastNetworkCoords.slice(-30);
         }
         log('[rawNet] Coordenadas extraídas del texto de red:', coords.length, coords[0]);
+      }
+
+      // Store for later re-processing when device names may not be in stableDeviceCache yet
+      // (the API response often arrives before the 4-second DOM extraction runs).
+      lastRawApiText = rawText;
+
+      // ── FMD array format parser: extract (device name, location) pairs ──────
+      // findDevicesInObject fails for FMD's positional-array protobuf-JSON format.
+      // parseFmdArrayFormat correlates brand-name strings with nearby coordinate pairs.
+      const fmdParsed = parseFmdArrayFormat(rawText);
+      if (fmdParsed.length > 0) {
+        let hasNewFmdLocation = false;
+        fmdParsed.forEach(d => {
+          const normKey = normalizeName(d.name);
+          // Update networkData
+          const existingNet = networkData.find(nd => normalizeName(nd.name) === normKey);
+          if (existingNet) {
+            if (!hasRealLocation(existingNet.location)) {
+              existingNet.location = d.location;
+              hasNewFmdLocation = true;
+            }
+          } else {
+            networkData.push(d);
+            hasNewFmdLocation = true;
+          }
+          // Update stableDeviceCache if the device is already known
+          const cached = stableDeviceCache.get(normKey);
+          if (cached && !hasRealLocation(cached.location)) {
+            stableDeviceCache.set(normKey, { ...cached, location: d.location });
+            log('[fmd-raw] stableDeviceCache actualizado:', d.name, d.location);
+          }
+        });
+        if (hasNewFmdLocation) {
+          log('[fmd-raw] Nuevas ubicaciones desde texto bruto, notificando dashboard...');
+          notifyDashboard();
+        }
       }
     }
   }
