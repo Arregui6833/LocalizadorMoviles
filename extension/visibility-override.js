@@ -63,6 +63,11 @@
       setTimeout(sendVisibleSignals, 1000);
       setTimeout(sendVisibleSignals, 3000);
       setTimeout(sendVisibleSignals, 6000);
+      // Periodically re-send visibility signals so FMD never pauses its internal
+      // polling loop, even long after the tab was loaded into the background.
+      // 10 s is short enough to recover quickly if FMD's timer does pause,
+      // and infrequent enough to avoid any measurable CPU overhead.
+      setInterval(sendVisibleSignals, 10000);
     });
 
   } catch (e) {

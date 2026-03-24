@@ -1645,8 +1645,8 @@
     if (!isFindMyDevicePage()) return;
     const detail = event.detail;
     if (!detail) return;
-    if (detail.type === 'network' && detail.data) {
-      processNetworkData(detail.data, detail.rawText || null);
+    if (detail.type === 'network') {
+      processNetworkData(detail.data || null, detail.rawText || null);
     } else if (detail.type === 'marker') {
       const lat = detail.lat;
       const lng = detail.lng;
@@ -1854,22 +1854,33 @@
         let hasNewFmdLocation = false;
         fmdParsed.forEach(d => {
           const normKey = normalizeName(d.name);
-          // Update networkData
+          // Update networkData — always apply fresh coordinates from the API response.
+          // Devices that already have a location need to receive updates so their
+          // position stays current when the FMD tab is in the background.
           const existingNet = networkData.find(nd => normalizeName(nd.name) === normKey);
           if (existingNet) {
-            if (!hasRealLocation(existingNet.location)) {
-              existingNet.location = d.location;
-              hasNewFmdLocation = true;
-            }
+            const locChanged = !existingNet.location ||
+              existingNet.location.lat !== d.location.lat ||
+              existingNet.location.lng !== d.location.lng;
+            existingNet.location = d.location;
+            if (locChanged) hasNewFmdLocation = true;
           } else {
             networkData.push(d);
             hasNewFmdLocation = true;
           }
-          // Update stableDeviceCache if the device is already known
+          // Update stableDeviceCache — always apply fresh location from the API.
+          // The previous guard (!hasRealLocation) prevented stale cached locations
+          // from ever being updated, which broke background tab location tracking.
           const cached = stableDeviceCache.get(normKey);
-          if (cached && !hasRealLocation(cached.location)) {
-            stableDeviceCache.set(normKey, { ...cached, location: d.location });
-            log('[fmd-raw] stableDeviceCache actualizado:', d.name, d.location);
+          if (cached) {
+            const locChanged = !cached.location ||
+              cached.location.lat !== d.location.lat ||
+              cached.location.lng !== d.location.lng;
+            if (locChanged) {
+              stableDeviceCache.set(normKey, { ...cached, location: d.location });
+              log('[fmd-raw] stableDeviceCache actualizado (ubicación fresca):', d.name, d.location);
+              hasNewFmdLocation = true;
+            }
           }
         });
         if (hasNewFmdLocation) {
