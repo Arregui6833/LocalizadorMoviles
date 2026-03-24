@@ -1699,43 +1699,70 @@
   // Google FMD's API responses encode device data as nested positional arrays without
   // named fields, so findDevicesInObject (which looks for keys like "name", "lat" etc.)
   // extracts nothing from them.  This function takes a different approach: it scans the
-  // raw response text for JSON string literals that look like device brand names, then
+  // raw response text for JSON string literals that look like device names, then
   // searches the text window immediately following each name for coordinate pairs.
   //
-  // This exploits the fact that FMD groups a device's name and coordinates together in
-  // the same sub-array, so they appear in close proximity in the serialized text.
+  // Two name-matching strategies are combined:
+  //   1. Brand-keyword filter — quickly matches strings containing known brand words.
+  //   2. Known-name lookup — matches strings that exactly equal a device name already in
+  //      stableDeviceCache or networkData, which handles custom nicknames and models that
+  //      aren't in the brand keyword list (e.g. "Mi 11", "Find X5 Pro", "Moto G").
+  //
+  // The coordinate search window is 3000 chars (up from 1500) to handle longer responses
+  // where name and coordinates are not immediately adjacent.
   function parseFmdArrayFormat(rawText) {
     if (!rawText || typeof rawText !== 'string') return [];
     const results = [];
     const seen = new Set();
 
+    // Build the set of known device names from cache and networkData for strategy 2.
+    const knownNormNames = new Set();
+    const knownNameMap = new Map(); // normName → original name
+    for (const [normKey, dev] of stableDeviceCache) {
+      if (dev.name && dev.name.length >= 2) {
+        knownNormNames.add(normKey);
+        knownNameMap.set(normKey, dev.name);
+      }
+    }
+    networkData.forEach(d => {
+      if (d.name && d.name.length >= 2) {
+        const nk = normalizeName(d.name);
+        if (nk) { knownNormNames.add(nk); knownNameMap.set(nk, d.name); }
+      }
+    });
+
     // Regex to find JSON string values (quoted, no backslash escapes, length 2–80)
     const stringRe = /"([^"\\]{2,80})"/g;
-    // Device brand / model name pattern (same as used elsewhere in the extension)
+    // Device brand / model name pattern
     const deviceNameRE = /pixel|samsung|galaxy|iphone|xiaomi|redmi|oneplus|huawei|oppo|motorola|nokia|sony|asus|realme|vivo|poco|tablet|watch|honor|nothing|lg|ipad/i;
 
     let m;
     while ((m = stringRe.exec(rawText)) !== null) {
       const candidate = m[1];
-      // Must look like a device brand/model name
-      if (!deviceNameRE.test(candidate)) continue;
       // Reject strings that look like URLs, paths, identifiers or JSON keys
       if (/[/\\<>{}[\]@=+]/.test(candidate)) continue;
-      // Deduplicate by normalized name
-      const normKey = candidate.toLowerCase().trim();
-      if (seen.has(normKey)) continue;
-      seen.add(normKey);
 
-      // Look for coordinate pairs in the 1500 chars immediately after this name.
-      // Using a bounded window prevents associating a name with a different device's
-      // coordinates that appear later in the response.
+      // Strategy 1: brand keyword match
+      const isBrandMatch = deviceNameRE.test(candidate);
+      // Strategy 2: known device name match (normalized comparison)
+      const normCandidate = normalizeName(candidate);
+      const isKnownDevice = normCandidate.length >= 2 && knownNormNames.has(normCandidate);
+
+      if (!isBrandMatch && !isKnownDevice) continue;
+
+      // Deduplicate by normalized candidate string
+      if (seen.has(normCandidate)) continue;
+      seen.add(normCandidate);
+
+      // Look for coordinate pairs in the 3000 chars immediately after this name.
       const searchStart = m.index + m[0].length;
-      const windowText = rawText.substring(searchStart, searchStart + 1500);
+      const windowText = rawText.substring(searchStart, searchStart + 3000);
       const coords = extractCoordsFromRawJson(windowText);
       if (coords.length === 0) continue;
 
-      // Clean up the name (remove trailing status text, location label prefixes)
-      const cleanName = trimDeviceName(stripLocationLabelPrefix(candidate)) || candidate;
+      // Use the canonical name from cache/networkData if available, otherwise clean up the candidate.
+      const canonicalName = knownNameMap.get(normCandidate) || candidate;
+      const cleanName = trimDeviceName(stripLocationLabelPrefix(canonicalName)) || canonicalName;
       if (!cleanName || cleanName.length < 2 || cleanName.length > 80) continue;
 
       results.push({
@@ -1751,10 +1778,12 @@
   }
 
   // Procesar datos de red
-  function processNetworkData(data, rawText) {    if (!data) return;
-    
+  function processNetworkData(data, rawText) {
+    if (!data && !rawText) return;
+
     log('Procesando datos de red...');
-    
+
+    if (data) {
     // Buscar estructura de dispositivos en la respuesta
     const devices = findDevicesInObject(data);
     if (devices.length > 0) {
@@ -1793,6 +1822,7 @@
         log('Datos de ubicación nuevos detectados, notificando dashboard...');
         notifyDashboard();
       }
+    }
     }
 
     // ── Raw-text coordinate extraction ───────────────────────────────────────

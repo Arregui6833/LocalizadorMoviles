@@ -104,8 +104,13 @@
 
     result.then(function (response) {
       response.clone().text().then(function (text) {
+        if (!text) return;
         const data = parseGoogleResponse(text);
-        if (data) emitNetworkData(data, text);
+        // Emit even when JSON parsing fails so the isolated world can still
+        // run extractCoordsFromRawJson on the raw text (coordinates are present
+        // in FMD's protobuf-JSON arrays regardless of whether the outer wrapper
+        // can be parsed as a JS object).
+        emitNetworkData(data || null, text);
       }).catch(function () {});
     }).catch(function () {});
 
@@ -126,8 +131,10 @@
 
     xhr.addEventListener('load', function () {
       if (!shouldIntercept(_interceptUrl)) return;
-      const data = parseGoogleResponse(xhr.responseText);
-      if (data) emitNetworkData(data, xhr.responseText);
+      const text = xhr.responseText;
+      if (!text) return;
+      const data = parseGoogleResponse(text);
+      emitNetworkData(data || null, text);
     });
 
     return xhr;
