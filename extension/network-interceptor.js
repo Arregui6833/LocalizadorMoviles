@@ -67,6 +67,21 @@
     }
   }
 
+  // Emit when the map is panned/centered to a location (fired by FMD's click handler
+  // synchronously when a device with a known location is selected — works even in
+  // background tabs where requestAnimationFrame is throttled and Marker never fires).
+  function emitMapCenter(lat, lng, method) {
+    try {
+      document.dispatchEvent(
+        new CustomEvent(EVENT_NAME, {
+          detail: { type: 'center', lat: lat, lng: lng, method: method || null },
+        })
+      );
+    } catch (e) {
+      // Ignore
+    }
+  }
+
   // ── Parse a Google response body (strips anti-XSSI prefix) ──────────────
   function parseGoogleResponse(text) {
     try {
@@ -176,6 +191,73 @@
       }
       _HookedAME.__dtHooked = true;
       try { _markerNS.AdvancedMarkerElement = _HookedAME; } catch (e) {}
+    }
+
+    // ── Hook Map.prototype pan/center methods ────────────────────────────────
+    // When FMD selects a device with a known location, it calls map.panTo() or
+    // map.setCenter() synchronously in its click handler — BEFORE any rendering
+    // via requestAnimationFrame. This means these methods fire reliably even in
+    // background tabs where rAF is throttled and Marker constructors never run.
+    if (gm.Map && gm.Map.prototype && !gm.Map.prototype.__dtPanHooked) {
+      gm.Map.prototype.__dtPanHooked = true;
+
+      // Helper to extract lat/lng from a Maps LatLng / LatLngLiteral
+      function _extractLatLng(latLng) {
+        if (!latLng) return null;
+        var lat = typeof latLng.lat === 'function' ? latLng.lat() : latLng.lat;
+        var lng = typeof latLng.lng === 'function' ? latLng.lng() : latLng.lng;
+        if (lat == null || lng == null) return null;
+        lat = parseFloat(lat); lng = parseFloat(lng);
+        if (isNaN(lat) || isNaN(lng)) return null;
+        if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+        if (Math.abs(lat) < 0.0001 && Math.abs(lng) < 0.0001) return null; // null-island
+        return { lat: lat, lng: lng };
+      }
+
+      // panTo(latLng)
+      var _origPanTo = gm.Map.prototype.panTo;
+      if (_origPanTo) {
+        gm.Map.prototype.panTo = function(latLng) {
+          try {
+            var c = _extractLatLng(latLng);
+            if (c) emitMapCenter(c.lat, c.lng, 'panTo');
+          } catch (e) {}
+          return _origPanTo.apply(this, arguments);
+        };
+      }
+
+      // setCenter(latLng)
+      var _origSetCenter = gm.Map.prototype.setCenter;
+      if (_origSetCenter) {
+        gm.Map.prototype.setCenter = function(latLng) {
+          try {
+            var c = _extractLatLng(latLng);
+            if (c) emitMapCenter(c.lat, c.lng, 'setCenter');
+          } catch (e) {}
+          return _origSetCenter.apply(this, arguments);
+        };
+      }
+
+      // fitBounds(bounds[, padding]) — derive center from the bounds
+      var _origFitBounds = gm.Map.prototype.fitBounds;
+      if (_origFitBounds) {
+        gm.Map.prototype.fitBounds = function(bounds) {
+          try {
+            var c = null;
+            if (bounds && typeof bounds.getCenter === 'function') {
+              c = _extractLatLng(bounds.getCenter());
+            } else if (bounds && bounds.north != null && bounds.south != null &&
+                       bounds.east != null && bounds.west != null) {
+              // LatLngBoundsLiteral
+              var lat = (bounds.north + bounds.south) / 2;
+              var lng = (bounds.east + bounds.west) / 2;
+              c = _extractLatLng({ lat: lat, lng: lng });
+            }
+            if (c) emitMapCenter(c.lat, c.lng, 'fitBounds');
+          } catch (e) {}
+          return _origFitBounds.apply(this, arguments);
+        };
+      }
     }
   }
 

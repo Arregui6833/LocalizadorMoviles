@@ -380,8 +380,10 @@
                 }
                 return false;
               })();
-              if (panelReady && hasNewPosition) {
-                log('✓ Panel y nueva posición detectados tras', waited, 'ms');
+              // Also check if the map was panned/centered after the click
+              const hasFreshMapCenter = lastMapCenter != null && lastMapCenter.timestamp > clickTime;
+              if (panelReady && (hasNewPosition || hasFreshMapCenter)) {
+                log('✓ Panel e indicador de posición detectados tras', waited, 'ms');
                 break;
               }
               if (panelReady && waited >= POLL_INTERVAL * 3) {
@@ -394,22 +396,33 @@
           // PASO C.2: Diff de [position] post-clic → ubicación específica del dispositivo clickeado.
           // Detecta elementos [position] nuevos o con valor cambiado tras el clic.
           let snapshotLocation = null;
-          document.querySelectorAll('[position]').forEach(el => {
-            if (snapshotLocation) return; // ya encontramos una
-            const pv = (el.getAttribute('position') || '').trim();
-            const m = pv.match(COORD_ATTR_RE);
-            if (!m) return;
-            const prevVal = positionsBefore.get(el);
-            if (prevVal === undefined || prevVal !== pv) {
-              // Elemento nuevo o con posición cambiada → pertenece al dispositivo clickeado
-              const lat = parseFloat(m[1]);
-              const lng = parseFloat(m[2]);
-              if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-                snapshotLocation = { lat, lng, address: null };
-                log('[snapshot] Posición detectada para', device.name, '→', lat, lng);
+
+          // PASO C.2a: Map center event (panTo/setCenter) received after the click.
+          // This fires synchronously in FMD's click handler — reliable even in background tabs.
+          if (lastMapCenter && lastMapCenter.timestamp > clickTime) {
+            snapshotLocation = { lat: lastMapCenter.lat, lng: lastMapCenter.lng, address: null };
+            log('[mapCenter] Posición capturada por Map.panTo/setCenter para', device.name, '→', snapshotLocation.lat, snapshotLocation.lng);
+          }
+
+          // PASO C.2b: Diff de [position] (fallback — only works in foreground when Maps renders)
+          if (!snapshotLocation) {
+            document.querySelectorAll('[position]').forEach(el => {
+              if (snapshotLocation) return; // ya encontramos una
+              const pv = (el.getAttribute('position') || '').trim();
+              const m = pv.match(COORD_ATTR_RE);
+              if (!m) return;
+              const prevVal = positionsBefore.get(el);
+              if (prevVal === undefined || prevVal !== pv) {
+                // Elemento nuevo o con posición cambiada → pertenece al dispositivo clickeado
+                const lat = parseFloat(m[1]);
+                const lng = parseFloat(m[2]);
+                if (!isNaN(lat) && !isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+                  snapshotLocation = { lat, lng, address: null };
+                  log('[snapshot] Posición detectada para', device.name, '→', lat, lng);
+                }
               }
-            }
-          });
+            });
+          }
 
           // PASO C.3: Si el diff no encontró nada, buscar el marcador activo/seleccionado.
           // Google Maps puede marcar el marcador del dispositivo seleccionado con atributos/clases de estado.
@@ -590,6 +603,30 @@
             } else {
               log('⚠ Sin coordenadas de red frescas para:', device.name);
             }
+          }
+
+          // ── PASO D.3: Fallback — use lastMapCenter if it arrived after click ──
+          // This covers the case where the raw JSON scan also found nothing but
+          // the Map.panTo hook did fire (e.g. FMD used cached location data and
+          // made no new network call, but still called panTo synchronously).
+          if (!locationCaptured && lastMapCenter && lastMapCenter.timestamp > clickTime) {
+            const mcLocation = { lat: lastMapCenter.lat, lng: lastMapCenter.lng, address: null };
+            log('[mapCenter-D3] Usando lastMapCenter para:', device.name, mcLocation.lat, mcLocation.lng);
+            const cacheKeyMC = normalizeName(device.name);
+            const cachedMC = stableDeviceCache.get(cacheKeyMC);
+            if (cachedMC && !hasRealLocation(cachedMC.location)) {
+              stableDeviceCache.set(cacheKeyMC, { ...cachedMC, location: mcLocation });
+            }
+            const existingNetMC = networkData.find(d =>
+              (d.name || '').toLowerCase() === deviceName ||
+              (d.name || '').toLowerCase().includes(deviceName.split(' ')[0])
+            );
+            if (existingNetMC) {
+              existingNetMC.location = mcLocation;
+            } else {
+              networkData.push({ name: device.name, location: mcLocation, source: 'map-center' });
+            }
+            locationCaptured = true;
           }
 
           // Notificar al dashboard si capturamos ubicación
@@ -1530,6 +1567,10 @@
   // Interceptar datos de red (XHR/Fetch)
   let networkData = [];
 
+  // Last map center event received from the MAIN-world interceptor.
+  // Updated whenever FMD calls map.panTo/setCenter/fitBounds (even in background tabs).
+  let lastMapCenter = null; // { lat, lng, timestamp }
+
   // Coordinate pairs extracted from raw API response text (used as a last-resort
   // fallback when findDevicesInObject can't parse Google's protobuf-JSON arrays).
   // Each entry: { lat, lng, timestamp }
@@ -1581,6 +1622,14 @@
       if (lat != null && lng != null) {
         mapMarkers.push({ lat: lat, lng: lng, title: detail.title || null });
         log('Marcador de mapa recibido del interceptor MAIN:', lat, lng);
+      }
+    } else if (detail.type === 'center') {
+      // Map pan/center fired by FMD's click handler synchronously — works in background.
+      const lat = detail.lat;
+      const lng = detail.lng;
+      if (lat != null && lng != null) {
+        lastMapCenter = { lat, lng, timestamp: Date.now() };
+        log('[mapCenter] Recibido del interceptor MAIN (', detail.method, '):', lat, lng);
       }
     }
   });
