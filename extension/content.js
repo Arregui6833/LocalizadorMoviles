@@ -110,10 +110,27 @@
         return;
       }
 
-      // Merge data: prefer values where existing is missing
+      // Merge data: prefer values where existing is missing.
+      // Special case for 'location': if the existing entry has an address-only
+      // location (truthy object but lat === null) and the incoming entry has real
+      // coordinates, prefer the coordinates.  Without this, an address-string from
+      // extractFromPageText (e.g. { address: "Madrid", lat: null }) would block
+      // networkData lat/lng (from parseFmdArrayFormat) from ever being applied,
+      // which caused background-tab location updates to stop working.
       const merged = { ...existing };
       Object.keys(device).forEach((field) => {
-        if (!merged[field] && device[field] != null) {
+        if (field === 'location') {
+          const existingHasCoords = merged.location?.lat != null;
+          const incomingHasCoords = device.location?.lat != null;
+          if (!merged.location && device.location != null) {
+            // No existing location at all → take incoming
+            merged.location = device.location;
+          } else if (!existingHasCoords && incomingHasCoords) {
+            // Existing is address-only (no lat/lng); incoming has real coords → prefer coords
+            merged.location = device.location;
+          }
+          // If existing already has coords, keep them (don't overwrite with later source)
+        } else if (!merged[field] && device[field] != null) {
           merged[field] = device[field];
         }
       });
@@ -1868,19 +1885,15 @@
             networkData.push(d);
             hasNewFmdLocation = true;
           }
-          // Update stableDeviceCache — always apply fresh location from the API.
-          // The previous guard (!hasRealLocation) prevented stale cached locations
-          // from ever being updated, which broke background tab location tracking.
+          // Update stableDeviceCache only when there is no real location yet.
+          // parseFmdArrayFormat is a heuristic: it searches for coordinate pairs in a
+          // text window after the device name and can pick up unrelated numbers (e.g.
+          // server coords) as false positives.  Let the extractDevices() merge path
+          // handle refreshes for devices that already have a high-quality location.
           const cached = stableDeviceCache.get(normKey);
-          if (cached) {
-            const locChanged = !cached.location ||
-              cached.location.lat !== d.location.lat ||
-              cached.location.lng !== d.location.lng;
-            if (locChanged) {
-              stableDeviceCache.set(normKey, { ...cached, location: d.location });
-              log('[fmd-raw] stableDeviceCache actualizado (ubicación fresca):', d.name, d.location);
-              hasNewFmdLocation = true;
-            }
+          if (cached && !hasRealLocation(cached.location)) {
+            stableDeviceCache.set(normKey, { ...cached, location: d.location });
+            log('[fmd-raw] stableDeviceCache actualizado:', d.name, d.location);
           }
         });
         if (hasNewFmdLocation) {
