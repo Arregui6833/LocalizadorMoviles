@@ -188,12 +188,19 @@ async function ensureFmdTabOpen() {
 // ensures our query sees the correct post-removal state.
 const TAB_REMOVAL_DEBOUNCE_MS = 500;
 
+// Guard to prevent multiple concurrent reopen attempts when several tabs are
+// closed in rapid succession within the debounce window.
+let _fmdReopenTimer = null;
+
 // Cuando se cierra una pestaña: si era la pestaña de FMD y el monitoreo en
 // segundo plano está activo, reabrirla automáticamente de forma oculta.
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (!EXTENSION_STATE.backgroundMonitoring) return;
-  // Pequeña espera para que la pestaña sea eliminada del listado antes de consultar
-  setTimeout(() => {
+  // Cancel any pending reopen and start a fresh debounce window so that
+  // closing multiple FMD tabs rapidly only results in one reopen attempt.
+  if (_fmdReopenTimer) clearTimeout(_fmdReopenTimer);
+  _fmdReopenTimer = setTimeout(() => {
+    _fmdReopenTimer = null;
     chrome.tabs.query({}, (allTabs) => {
       const hasFmdTab = allTabs.some(tab => isFindMyDeviceTab(tab.url));
       if (!hasFmdTab) {
@@ -207,16 +214,22 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }, TAB_REMOVAL_DEBOUNCE_MS);
 });
 
-// Al arrancar el navegador: restaurar el monitoreo en segundo plano si estaba activo
-chrome.runtime.onStartup.addListener(() => {
+// Inicializar estado desde storage (cubre tanto onStartup como reinicios del SW)
+function initStateFromStorage() {
   chrome.storage.local.get(['backgroundMonitoring'], (result) => {
     if (result.backgroundMonitoring) {
-      console.log('[Background] Restaurando monitoreo en segundo plano tras inicio del navegador');
+      console.log('[Background] Restaurando monitoreo en segundo plano');
       EXTENSION_STATE.backgroundMonitoring = true;
       ensureFmdTabOpen();
     }
   });
-});
+}
+
+// Al arrancar el navegador: restaurar el monitoreo en segundo plano si estaba activo
+chrome.runtime.onStartup.addListener(initStateFromStorage);
+
+// También inicializar cuando el SW arranca/se reinicia (por si onStartup no dispara)
+initStateFromStorage();
 
 
 function isFindMyDeviceTab(url) {

@@ -139,7 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function updateBgMonitorUI(active) {
     if (active) {
       bgMonitorBtn.classList.add('active');
-      bgMonitorLabel.textContent = 'Segundo plano: ACTIVO';
+      bgMonitorLabel.textContent = 'Monitoreo en segundo plano: ACTIVO';
     } else {
       bgMonitorBtn.classList.remove('active');
       bgMonitorLabel.textContent = 'Monitoreo en segundo plano';
